@@ -8,21 +8,28 @@ import (
 	"os"
 )
 
-type Master struct {
-	// Your definitions here.
+// task status enum
+type TaskStatus int
 
+const (
+	Pending   TaskStatus = iota
+	Running   TaskStatus = iota
+	Succeeded TaskStatus = iota
+	Failed    TaskStatus = iota
+)
+
+// struct for getting info on a task
+type Task struct {
+	id     int
+	file   string
+	status TaskStatus
 }
 
-// Your code here -- RPC handlers for the worker to call.
-
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
+type Master struct {
+	nMapTasks    int
+	nReduceTasks int
+	mapTasks     []Task
+	reduceTasks  []Task
 }
 
 //
@@ -46,11 +53,25 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	ret := false
+	return false
+}
 
-	// Your code here.
+// a worker calls this to get a task
+func (m *Master) GetTask(args *BaseArgs, reply *GetTaskReply) error {
 
-	return ret
+	// search for a map task
+	for i := 0; i < m.nMapTasks; i++ {
+		if m.mapTasks[i].status == Pending || m.mapTasks[i].status == Failed {
+			reply.Id = m.mapTasks[i].id
+			reply.Type = "map"
+			reply.File = m.mapTasks[i].file
+			return nil
+		}
+	}
+
+	// if all map tasks taken, look for a reduce task
+	reply.Msg = "get task reply message"
+	return nil
 }
 
 //
@@ -59,9 +80,15 @@ func (m *Master) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
+	m := Master{nMapTasks: len(files), nReduceTasks: nReduce}
 
-	// Your code here.
+	// instantiate list of map tasks and reduce tasks
+	for i := 0; i < len(files); i++ {
+		m.mapTasks = append(m.mapTasks, Task{id: i, status: Pending, file: files[i]})
+	}
+	for i := 0; i < nReduce; i++ {
+		m.reduceTasks = append(m.reduceTasks, Task{id: i, status: Pending})
+	}
 
 	m.server()
 	return &m
