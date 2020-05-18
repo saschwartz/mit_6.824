@@ -39,11 +39,9 @@ func Worker(mapf func(string, string) []KeyValue,
 	if err == nil && len(reply.Files) > 0 {
 
 		// TODO: execute the map task
+		err = updateTaskStatus(reply.Id, Map, Running)
 		status := executeMapTask(reply.Files)
-		args := UpdateTaskStatusArgs{Id: reply.Id, Type: Map, NewStatus: status}
-		reply := BaseReply{}
-		err = call("Master.UpdateTaskStatus", &args, &reply)
-		fmt.Println(reply.Msg)
+		err = updateTaskStatus(reply.Id, Map, status)
 
 	} else if err != nil {
 		return errors.New("Failed to execute map task")
@@ -55,11 +53,9 @@ func Worker(mapf func(string, string) []KeyValue,
 		if err == nil && len(reply.Files) > 0 {
 
 			// TODO: execute the reduce task
+			err = updateTaskStatus(reply.Id, Reduce, Running)
 			status := executeReduceTask(reply.Files)
-			args := UpdateTaskStatusArgs{Id: reply.Id, Type: Reduce, NewStatus: status}
-			reply := BaseReply{}
-			err = call("Master.UpdateTaskStatus", &args, &reply)
-			fmt.Println(reply.Msg)
+			err = updateTaskStatus(reply.Id, Reduce, status)
 
 		} else if err != nil {
 			return errors.New("Failed to execute reduce task")
@@ -70,6 +66,15 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// successful procedure
 	return nil
+}
+
+// helper function to update a task status
+func updateTaskStatus(id int, t TaskType, newStatus TaskStatus) error {
+	args := UpdateTaskStatusArgs{Id: id, Type: t, NewStatus: newStatus}
+	reply := BaseReply{}
+	err := call("Master.UpdateTaskStatus", &args, &reply)
+	fmt.Println(reply.Msg)
+	return err
 }
 
 // execute a map task, given a list of files
