@@ -74,12 +74,14 @@ func Worker(mapf func(string, string) []KeyValue,
 
 // execute a map task, given a list of files
 func executeMapTask(files []string) TaskStatus {
+	// TODO - implement
 	fmt.Printf("Map reply.Files: %v\n", files)
 	return Succeeded
 }
 
 // excecute a reduce task, given a list of files
 func executeReduceTask(files []string) TaskStatus {
+	// TODO - implement
 	fmt.Printf("Reduce reply.Files: %v\n", files)
 	return Succeeded
 }
