@@ -1,6 +1,8 @@
 package mr
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -8,7 +10,7 @@ import (
 	"os"
 )
 
-// task status enum
+// task status and type enums
 type TaskStatus int
 
 const (
@@ -16,6 +18,13 @@ const (
 	Running   TaskStatus = iota
 	Succeeded TaskStatus = iota
 	Failed    TaskStatus = iota
+)
+
+type TaskType int
+
+const (
+	Map    TaskType = iota
+	Reduce TaskType = iota
 )
 
 // struct for getting info on a task
@@ -56,22 +65,59 @@ func (m *Master) Done() bool {
 	return false
 }
 
-// a worker calls this to get a task
-func (m *Master) GetTask(args *BaseArgs, reply *GetTaskReply) error {
+// a worker calls this to get a map task
+func (m *Master) GetMapTask(args *BaseArgs, reply *GetTaskReply) error {
 
 	// search for a map task
 	for i := 0; i < m.nMapTasks; i++ {
 		if m.mapTasks[i].status == Pending || m.mapTasks[i].status == Failed {
 			reply.Id = m.mapTasks[i].id
-			reply.Type = "map"
-			reply.File = m.mapTasks[i].file
+			reply.Files = []string{m.mapTasks[i].file}
+			reply.Msg = "Found a map task."
 			return nil
 		}
 	}
 
-	// if all map tasks taken, look for a reduce task
-	reply.Msg = "get task reply message"
+	// no task available
+	reply.Msg = "No map task available."
 	return nil
+}
+
+// a worker calls this to get a reduce task
+func (m *Master) GetReduceTask(args *BaseArgs, reply *GetTaskReply) error {
+
+	// search for a reduce task
+	for i := 0; i < m.nReduceTasks; i++ {
+		if m.reduceTasks[i].status == Pending || m.reduceTasks[i].status == Failed {
+			reply.Id = m.mapTasks[i].id
+			reply.Files = make([]string, m.nMapTasks)
+			// format is mr-mapId-reduceId
+			for j := 0; j < m.nMapTasks; j++ {
+				reply.Files[j] = fmt.Sprintf("mr-%d-%d", j, i)
+			}
+			reply.Msg = "Found a reduce task."
+			return nil
+		}
+	}
+
+	// no task available
+	reply.Msg = "No reduce task available."
+	return nil
+}
+
+// a worker calls this to update a task status
+func (m *Master) UpdateTaskStatus(args *UpdateTaskStatusArgs, reply *BaseReply) error {
+	if args.Type == Map {
+		m.mapTasks[args.Id].status = args.NewStatus
+		reply.Msg = fmt.Sprintf("Map task id: %v updated to status: %v", args.Id, args.NewStatus)
+		return nil
+	} else if args.Type == Reduce {
+		m.reduceTasks[args.Id].status = args.NewStatus
+		reply.Msg = fmt.Sprintf("Reduce task id: %v updated to status: %v", args.Id, args.NewStatus)
+		return nil
+	} else {
+		return errors.New("Task type must be Map or Reduce.")
+	}
 }
 
 //

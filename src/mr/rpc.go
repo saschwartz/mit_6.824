@@ -30,12 +30,19 @@ type BaseReply struct {
 	Msg string
 }
 
-// GetTask rpc needs to return task type, id and target file
+// GetTask rpc needs to return task id and target files
 type GetTaskReply struct {
 	BaseReply
-	Id   int
-	Type string
-	File string
+	Id    int
+	Files []string
+}
+
+// UpdateTaskStatus rpc needs a task id and task type
+type UpdateTaskStatusArgs struct {
+	BaseArgs
+	Id        int
+	Type      TaskType
+	NewStatus TaskStatus
 }
 
 // Cook up a unique-ish UNIX-domain socket name
