@@ -33,8 +33,9 @@ type BaseReply struct {
 // GetTask rpc needs to return task id and target files
 type GetTaskReply struct {
 	BaseReply
-	Id    int
-	Files []string
+	Id           int
+	Files        []string
+	NReduceTasks int
 }
 
 // UpdateTaskStatus rpc needs a task id and task type

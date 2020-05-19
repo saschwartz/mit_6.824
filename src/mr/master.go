@@ -62,18 +62,32 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	return false
+	for i := 0; i < m.nMapTasks; i++ {
+		if m.mapTasks[i].status != Succeeded {
+			return false
+		}
+	}
+	for i := 0; i < m.nReduceTasks; i++ {
+		if m.reduceTasks[i].status != Succeeded {
+			return false
+		}
+	}
+	fmt.Println("Job complete.")
+	return true
 }
 
 // a worker calls this to get a map task
+// this will also set the task status to running
 func (m *Master) GetMapTask(args *BaseArgs, reply *GetTaskReply) error {
 
 	// search for a map task
 	for i := 0; i < m.nMapTasks; i++ {
 		if m.mapTasks[i].status == Pending || m.mapTasks[i].status == Failed {
+			m.mapTasks[i].status = Running
 			reply.Id = m.mapTasks[i].id
 			reply.Files = []string{m.mapTasks[i].file}
 			reply.Msg = "Found a map task."
+			reply.NReduceTasks = m.nReduceTasks
 			return nil
 		}
 	}
@@ -84,12 +98,14 @@ func (m *Master) GetMapTask(args *BaseArgs, reply *GetTaskReply) error {
 }
 
 // a worker calls this to get a reduce task
+// this will also set the task status to running
 func (m *Master) GetReduceTask(args *BaseArgs, reply *GetTaskReply) error {
 
 	// search for a reduce task
 	for i := 0; i < m.nReduceTasks; i++ {
 		if m.reduceTasks[i].status == Pending || m.reduceTasks[i].status == Failed {
-			reply.Id = m.mapTasks[i].id
+			m.reduceTasks[i].status = Running
+			reply.Id = m.reduceTasks[i].id
 			reply.Files = make([]string, m.nMapTasks)
 			// format is mr-mapId-reduceId
 			for j := 0; j < m.nMapTasks; j++ {
