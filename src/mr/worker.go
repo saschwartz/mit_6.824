@@ -53,8 +53,9 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// try get a map task
 	for true {
+		args := GetTaskArgs{Type: Map}
 		reply := GetTaskReply{}
-		err := call("Master.GetMapTask", BaseArgs{}, &reply)
+		err := call("Master.GetTask", &args, &reply)
 		fmt.Println(reply.Msg)
 		if err == nil && len(reply.Files) > 0 {
 
@@ -66,8 +67,9 @@ func Worker(mapf func(string, string) []KeyValue,
 			log.Fatal("Failed to execute map task")
 		} else {
 			// get a reduce task if no available map tasks
+			args := GetTaskArgs{Type: Reduce}
 			reply := GetTaskReply{}
-			err = call("Master.GetReduceTask", BaseArgs{}, &reply)
+			err = call("Master.GetReduceTask", &args, &reply)
 			fmt.Println(reply.Msg)
 			if err == nil && len(reply.Files) > 0 {
 

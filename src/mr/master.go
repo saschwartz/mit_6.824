@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -36,16 +35,16 @@ const (
 // struct for getting info on a task
 type Task struct {
 	id             int
-	file           string
+	files          []string
 	status         TaskStatus
+	taskType       TaskType
 	executionStart time.Time
 }
 
 type Master struct {
 	nMapTasks    int
 	nReduceTasks int
-	mapTasks     []Task
-	reduceTasks  []Task
+	tasks        []Task
 }
 
 //
@@ -69,13 +68,8 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	for i := 0; i < m.nMapTasks; i++ {
-		if m.mapTasks[i].status != Succeeded {
-			return false
-		}
-	}
-	for i := 0; i < m.nReduceTasks; i++ {
-		if m.reduceTasks[i].status != Succeeded {
+	for i := 0; i < len(m.tasks); i++ {
+		if m.tasks[i].status != Succeeded {
 			return false
 		}
 	}
@@ -83,70 +77,44 @@ func (m *Master) Done() bool {
 	return true
 }
 
-// a worker calls this to get a map task
+// a worker calls this to get a task
 // this will also set the task status to running
-func (m *Master) GetMapTask(args *BaseArgs, reply *GetTaskReply) error {
+func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 
-	// search for a map task
-	for i := 0; i < m.nMapTasks; i++ {
-		task := m.mapTasks[i]
-		if task.status == Pending || task.status == Failed ||
-			time.Now().Sub(task.executionStart) > TaskTimeoutTime {
-			m.mapTasks[i].status = Running
-			m.mapTasks[i].executionStart = time.Now()
-			reply.Id = m.mapTasks[i].id
-			reply.Files = []string{m.mapTasks[i].file}
-			reply.Msg = fmt.Sprintf("RPC GetMapTask found a map task: id %v", reply.Id)
+	// search for a task
+	for i := 0; i < len(m.tasks); i++ {
+		task := m.tasks[i]
+
+		if task.taskType == args.Type &&
+			(task.status == Pending || task.status == Failed ||
+				time.Now().Sub(task.executionStart) > TaskTimeoutTime) {
+			m.tasks[i].status = Running
+			m.tasks[i].executionStart = time.Now()
+			reply.Id = m.tasks[i].id
+			reply.Files = m.tasks[i].files
 			reply.NReduceTasks = m.nReduceTasks
+			reply.Msg = fmt.Sprintf("RPC GetTask: task: id %v, type %v", reply.Id, args.Type)
 			return nil
 		}
 	}
 
 	// no task available
-	reply.Msg = "RPC GetMapTask says no reduce task available."
-	return nil
-}
-
-// a worker calls this to get a reduce task
-// this will also set the task status to running
-func (m *Master) GetReduceTask(args *BaseArgs, reply *GetTaskReply) error {
-
-	// search for a reduce task
-	for i := 0; i < m.nReduceTasks; i++ {
-		task := m.reduceTasks[i]
-		if task.status == Pending || task.status == Failed ||
-			time.Now().Sub(task.executionStart) > TaskTimeoutTime {
-			m.reduceTasks[i].status = Running
-			m.reduceTasks[i].executionStart = time.Now()
-			reply.Id = m.reduceTasks[i].id
-			reply.Files = make([]string, m.nMapTasks)
-			// format is mr-mapId-reduceId
-			for j := 0; j < m.nMapTasks; j++ {
-				reply.Files[j] = fmt.Sprintf("mr-%d-%d", j, i)
-			}
-			reply.Msg = fmt.Sprintf("RPC GetReduceTask found a reduce task: id %v", reply.Id)
-			return nil
-		}
-	}
-
-	// no task available
-	reply.Msg = "RPC GetReduceTask says no reduce task available."
+	reply.Msg = fmt.Sprintf("RPC GetTask: no task of type %v available.", args.Type)
 	return nil
 }
 
 // a worker calls this to update a task status
 func (m *Master) UpdateTaskStatus(args *UpdateTaskStatusArgs, reply *BaseReply) error {
-	if args.Type == Map {
-		m.mapTasks[args.Id].status = args.NewStatus
-		reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus updated map task id: %v to status: %v", args.Id, args.NewStatus)
+	for i := 0; i < len(m.tasks); i++ {
+		if m.tasks[i].id == args.Id && m.tasks[i].taskType == args.Type {
+			m.tasks[i].status = args.NewStatus
+			reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: updated task type: %v id: %v to status: %v", args.Type, args.Id, args.NewStatus)
+			return nil
+		}
+		reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: no task of type %v id: %v exists.", args.Type, args.Id)
 		return nil
-	} else if args.Type == Reduce {
-		m.reduceTasks[args.Id].status = args.NewStatus
-		reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus updated reduce task %v to status: %v", args.Id, args.NewStatus)
-		return nil
-	} else {
-		return errors.New("Task type must be Map or Reduce.")
 	}
+	return nil
 }
 
 //
@@ -159,10 +127,14 @@ func MakeMaster(files []string, nReduce int) *Master {
 
 	// instantiate list of map tasks and reduce tasks
 	for i := 0; i < len(files); i++ {
-		m.mapTasks = append(m.mapTasks, Task{id: i, status: Pending, file: files[i]})
+		m.tasks = append(m.tasks, Task{id: i, taskType: Map, status: Pending, files: []string{files[i]}})
 	}
 	for i := 0; i < nReduce; i++ {
-		m.reduceTasks = append(m.reduceTasks, Task{id: i, status: Pending})
+		task := Task{id: i, taskType: Reduce, status: Pending, files: make([]string, m.nMapTasks)}
+		for j := 0; j < m.nMapTasks; j++ {
+			task.files[j] = fmt.Sprintf("mr-%d-%d", j, i)
+		}
+		m.tasks = append(m.tasks, task)
 	}
 
 	m.server()

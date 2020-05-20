@@ -31,6 +31,10 @@ type BaseReply struct {
 }
 
 // GetTask rpc needs to return task id and target files
+type GetTaskArgs struct {
+	BaseArgs
+	Type TaskType
+}
 type GetTaskReply struct {
 	BaseReply
 	Id           int
