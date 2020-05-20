@@ -88,6 +88,11 @@ func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 		if task.taskType == args.Type &&
 			(task.status == Pending || task.status == Failed ||
 				time.Now().Sub(task.executionStart) > TaskTimeoutTime) {
+
+			if time.Now().Sub(task.executionStart) > TaskTimeoutTime {
+				fmt.Printf("Master: timeout on task, reassigning: id %v, type %v", reply.Id, args.Type)
+			}
+
 			m.tasks[i].status = Running
 			m.tasks[i].executionStart = time.Now()
 			reply.Id = m.tasks[i].id
@@ -111,7 +116,6 @@ func (m *Master) UpdateTaskStatus(args *UpdateTaskStatusArgs, reply *BaseReply) 
 			reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: updated task type: %v id: %v to status: %v", args.Type, args.Id, args.NewStatus)
 			return nil
 		}
-		return nil
 	}
 	reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: no task of type: %v id: %v exists.", args.Type, args.Id)
 	return nil
