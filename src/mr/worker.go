@@ -69,7 +69,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			// get a reduce task if no available map tasks
 			args := GetTaskArgs{Type: Reduce}
 			reply := GetTaskReply{}
-			err = call("Master.GetReduceTask", &args, &reply)
+			err = call("Master.GetTask", &args, &reply)
 			fmt.Println(reply.Msg)
 			if err == nil && len(reply.Files) > 0 {
 
