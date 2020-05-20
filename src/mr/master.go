@@ -86,7 +86,7 @@ func (m *Master) GetMapTask(args *BaseArgs, reply *GetTaskReply) error {
 			m.mapTasks[i].status = Running
 			reply.Id = m.mapTasks[i].id
 			reply.Files = []string{m.mapTasks[i].file}
-			reply.Msg = "Found a map task."
+			reply.Msg = fmt.Sprintf("RPC GetMapTask found a map task: id %v", reply.Id)
 			reply.NReduceTasks = m.nReduceTasks
 			return nil
 		}
@@ -111,7 +111,7 @@ func (m *Master) GetReduceTask(args *BaseArgs, reply *GetTaskReply) error {
 			for j := 0; j < m.nMapTasks; j++ {
 				reply.Files[j] = fmt.Sprintf("mr-%d-%d", j, i)
 			}
-			reply.Msg = "Found a reduce task."
+			reply.Msg = fmt.Sprintf("RPC GetReduceTask found a map task: id %v", reply.Id)
 			return nil
 		}
 	}
@@ -125,11 +125,11 @@ func (m *Master) GetReduceTask(args *BaseArgs, reply *GetTaskReply) error {
 func (m *Master) UpdateTaskStatus(args *UpdateTaskStatusArgs, reply *BaseReply) error {
 	if args.Type == Map {
 		m.mapTasks[args.Id].status = args.NewStatus
-		reply.Msg = fmt.Sprintf("Map task id: %v updated to status: %v", args.Id, args.NewStatus)
+		reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus updated map task id: %v to status: %v", args.Id, args.NewStatus)
 		return nil
 	} else if args.Type == Reduce {
 		m.reduceTasks[args.Id].status = args.NewStatus
-		reply.Msg = fmt.Sprintf("Reduce task id: %v updated to status: %v", args.Id, args.NewStatus)
+		reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus updated reduce task %v to status: %v", args.Id, args.NewStatus)
 		return nil
 	} else {
 		return errors.New("Task type must be Map or Reduce.")

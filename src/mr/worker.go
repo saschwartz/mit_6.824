@@ -1,7 +1,7 @@
 package mr
 
 import (
-	"errors"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
@@ -49,40 +49,40 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) error {
+	reducef func(string, []string) string) {
 
 	// try get a map task
-	reply := GetTaskReply{}
-	err := call("Master.GetMapTask", BaseArgs{}, &reply)
-	fmt.Println(reply.Msg)
-	if err == nil && len(reply.Files) > 0 {
-
-		// TODO: execute the map task
-		status := executeMapTask(reply, mapf)
-		err = updateTaskStatus(reply.Id, Map, status)
-
-	} else if err != nil {
-		return errors.New("Failed to execute map task")
-	} else {
-		// get a reduce task if no available map tasks
+	for true {
 		reply := GetTaskReply{}
-		err = call("Master.GetReduceTask", BaseArgs{}, &reply)
+		err := call("Master.GetMapTask", BaseArgs{}, &reply)
 		fmt.Println(reply.Msg)
 		if err == nil && len(reply.Files) > 0 {
 
-			// TODO: execute the reduce task
-			status := executeReduceTask(reply, reducef)
-			err = updateTaskStatus(reply.Id, Reduce, status)
+			// TODO: execute the map task
+			status := executeMapTask(reply, mapf)
+			err = updateTaskStatus(reply.Id, Map, status)
 
 		} else if err != nil {
-			return errors.New("Failed to execute reduce task")
+			log.Fatal("Failed to execute map task")
 		} else {
-			fmt.Println("All map and reduce tasks complete!")
+			// get a reduce task if no available map tasks
+			reply := GetTaskReply{}
+			err = call("Master.GetReduceTask", BaseArgs{}, &reply)
+			fmt.Println(reply.Msg)
+			if err == nil && len(reply.Files) > 0 {
+
+				// TODO: execute the reduce task
+				status := executeReduceTask(reply, reducef)
+				err = updateTaskStatus(reply.Id, Reduce, status)
+
+			} else if err != nil {
+				log.Fatal("Failed to execute reduce task")
+			} else {
+				fmt.Println("No tasks currently available.")
+				return
+			}
 		}
 	}
-
-	// successful procedure
-	return nil
 }
 
 // helper function to update a task status
@@ -127,7 +127,12 @@ func executeMapTask(reply GetTaskReply, mapf func(string, string) []KeyValue) Ta
 	// write the mapped key value pairs to the relevant output files
 	for i := 0; i < len(kva); i++ {
 		reduceTaskId := ihash(kva[i].Key) % reply.NReduceTasks
-		fmt.Fprintf(ofileMap[reduceTaskId], "%v %v\n", kva[i].Key, kva[i].Value)
+		enc := json.NewEncoder(ofileMap[reduceTaskId])
+		err := enc.Encode(kva[i])
+		if err != nil {
+			log.Fatalf("error encoding %v", kva[i])
+			return Failed
+		}
 	}
 
 	// rename our tmp files to real files so that reduce tasks will know
@@ -142,6 +147,8 @@ func executeMapTask(reply GetTaskReply, mapf func(string, string) []KeyValue) Ta
 
 // excecute a reduce task, given a list of files
 func executeReduceTask(reply GetTaskReply, reducef func(string, []string) string) TaskStatus {
+	// create our outfile
+	ofile, _ := os.Create(fmt.Sprintf("mr-out-%v", reply.Id))
 
 	// check we have all our files.
 	// do this for ReduceWaitTime, polling at ReducePollInterval
@@ -158,16 +165,17 @@ func executeReduceTask(reply GetTaskReply, reducef func(string, []string) string
 		if !missingFiles {
 			break
 		}
-		fmt.Printf("Reduce task %v missing files. Waiting.", reply.Id)
+		fmt.Printf("Reduce task %v missing files. Waiting.\n", reply.Id)
 		time.Sleep(ReducePollInterval * time.Second)
 	}
 	if missingFiles {
-		fmt.Printf("Reduce task %v did not get files in time, failing.", reply.Id)
+		fmt.Printf("Reduce task %v did not get files in time, failing.\n", reply.Id)
 		return Failed
 	}
 
 	// read our files and concat all the content
 	// fail on open or read errors
+	kva := []KeyValue{}
 	for i := 0; i < len(reply.Files); i++ {
 		file, err := os.Open(reply.Files[i])
 		if err != nil {
@@ -175,19 +183,39 @@ func executeReduceTask(reply GetTaskReply, reducef func(string, []string) string
 			return Failed
 		}
 
-		// try read file, then close
-		content, err := ioutil.ReadAll(file)
-		if err != nil {
-			log.Fatalf("cannot read %v", reply.Files[i])
-			return Failed
+		dec := json.NewDecoder(file)
+		var kv KeyValue
+		for dec.Decode(&kv) == nil {
+			kva = append(kva, kv)
 		}
-		file.Close()
 
-		fmt.Println(content)
+		file.Close()
 	}
 
-	// TODO - implement
-	fmt.Printf("Reduce reply.Files: %v\n", reply.Files)
+	// sort kva by our keys
+	// then walk through kva, reducing each time we have a
+	// set of identical keys (use sliding window approach)
+	sort.Sort(ByKey(kva))
+	i := 0
+	for i < len(kva) {
+		values := []string{kva[i].Value}
+
+		// walk up through identical keys
+		j := i + 1
+		for j < len(kva) && kva[i].Key == kva[j].Key {
+			values = append(values, kva[j].Value)
+			j++
+		}
+
+		// do the reduce and write output
+		output := reducef(kva[i].Key, values)
+		fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
+
+		// slide up
+		i = j
+	}
+
+	fmt.Printf("Reduce task %v complete\n", reply.Id)
 	return Succeeded
 }
 

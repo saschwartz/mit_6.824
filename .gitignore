@@ -2,3 +2,5 @@ pkg/
 api.key
 *-handin.tar.gz
 
+# map reduce
+mr-*-*
