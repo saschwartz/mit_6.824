@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"time"
 )
 
 // task status and type enums
@@ -20,6 +21,11 @@ const (
 	Failed    TaskStatus = iota
 )
 
+// how long before assuming a crash has occurred
+const (
+	TaskTimeoutTime time.Duration = (time.Second * 10)
+)
+
 type TaskType int
 
 const (
@@ -29,9 +35,10 @@ const (
 
 // struct for getting info on a task
 type Task struct {
-	id     int
-	file   string
-	status TaskStatus
+	id             int
+	file           string
+	status         TaskStatus
+	executionStart time.Time
 }
 
 type Master struct {
@@ -82,8 +89,11 @@ func (m *Master) GetMapTask(args *BaseArgs, reply *GetTaskReply) error {
 
 	// search for a map task
 	for i := 0; i < m.nMapTasks; i++ {
-		if m.mapTasks[i].status == Pending || m.mapTasks[i].status == Failed {
+		task := m.mapTasks[i]
+		if task.status == Pending || task.status == Failed ||
+			time.Now().Sub(task.executionStart) > TaskTimeoutTime {
 			m.mapTasks[i].status = Running
+			m.mapTasks[i].executionStart = time.Now()
 			reply.Id = m.mapTasks[i].id
 			reply.Files = []string{m.mapTasks[i].file}
 			reply.Msg = fmt.Sprintf("RPC GetMapTask found a map task: id %v", reply.Id)
@@ -93,7 +103,7 @@ func (m *Master) GetMapTask(args *BaseArgs, reply *GetTaskReply) error {
 	}
 
 	// no task available
-	reply.Msg = "No map task available."
+	reply.Msg = "RPC GetMapTask says no reduce task available."
 	return nil
 }
 
@@ -103,21 +113,24 @@ func (m *Master) GetReduceTask(args *BaseArgs, reply *GetTaskReply) error {
 
 	// search for a reduce task
 	for i := 0; i < m.nReduceTasks; i++ {
-		if m.reduceTasks[i].status == Pending || m.reduceTasks[i].status == Failed {
+		task := m.reduceTasks[i]
+		if task.status == Pending || task.status == Failed ||
+			time.Now().Sub(task.executionStart) > TaskTimeoutTime {
 			m.reduceTasks[i].status = Running
+			m.reduceTasks[i].executionStart = time.Now()
 			reply.Id = m.reduceTasks[i].id
 			reply.Files = make([]string, m.nMapTasks)
 			// format is mr-mapId-reduceId
 			for j := 0; j < m.nMapTasks; j++ {
 				reply.Files[j] = fmt.Sprintf("mr-%d-%d", j, i)
 			}
-			reply.Msg = fmt.Sprintf("RPC GetReduceTask found a map task: id %v", reply.Id)
+			reply.Msg = fmt.Sprintf("RPC GetReduceTask found a reduce task: id %v", reply.Id)
 			return nil
 		}
 	}
 
 	// no task available
-	reply.Msg = "No reduce task available."
+	reply.Msg = "RPC GetReduceTask says no reduce task available."
 	return nil
 }
 
