@@ -23,7 +23,7 @@ type KeyValue struct {
 // parameters for how long a reduce task should wait
 // for all the necessary files to become available
 const (
-	ReduceWaitTime     float64       = 5.0
+	ReduceWaitTime     float64       = 3.0
 	ReducePollInterval time.Duration = 1.0
 )
 
