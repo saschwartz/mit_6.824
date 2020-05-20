@@ -90,7 +90,7 @@ func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 				time.Now().Sub(task.executionStart) > TaskTimeoutTime) {
 
 			if time.Now().Sub(task.executionStart) > TaskTimeoutTime {
-				fmt.Printf("Master: timeout on task, reassigning: id %v, type %v", reply.Id, args.Type)
+				fmt.Printf("Master: timeout on task, reassigning: id %v, type: %v\n", reply.Id, args.Type)
 			}
 
 			m.tasks[i].status = Running
@@ -98,13 +98,13 @@ func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 			reply.Id = m.tasks[i].id
 			reply.Files = m.tasks[i].files
 			reply.NReduceTasks = m.nReduceTasks
-			reply.Msg = fmt.Sprintf("RPC GetTask: task: id %v, type %v", reply.Id, args.Type)
+			reply.Msg = fmt.Sprintf("RPC GetTask: task: id %v, type: %v", reply.Id, args.Type)
 			return nil
 		}
 	}
 
 	// no task available
-	reply.Msg = fmt.Sprintf("RPC GetTask: no task of type %v available.", args.Type)
+	reply.Msg = fmt.Sprintf("RPC GetTask: no task of type: %v available.", args.Type)
 	return nil
 }
 
