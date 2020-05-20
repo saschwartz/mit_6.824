@@ -111,9 +111,9 @@ func (m *Master) UpdateTaskStatus(args *UpdateTaskStatusArgs, reply *BaseReply) 
 			reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: updated task type: %v id: %v to status: %v", args.Type, args.Id, args.NewStatus)
 			return nil
 		}
-		reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: no task of type %v id: %v exists.", args.Type, args.Id)
 		return nil
 	}
+	reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: no task of type: %v id: %v exists.", args.Type, args.Id)
 	return nil
 }
 

@@ -56,7 +56,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		args := GetTaskArgs{Type: Map}
 		reply := GetTaskReply{}
 		err := call("Master.GetTask", &args, &reply)
-		fmt.Println(reply.Msg)
+		fmt.Printf("Worker: RPC GetTask replied '%v'\n", reply.Msg)
 		if err == nil && len(reply.Files) > 0 {
 
 			// TODO: execute the map task
@@ -64,13 +64,13 @@ func Worker(mapf func(string, string) []KeyValue,
 			err = updateTaskStatus(reply.Id, Map, status)
 
 		} else if err != nil {
-			log.Fatal("Failed to execute map task")
+			fmt.Printf("Worker: Failed to execute map task id: %v\n", reply.Id)
 		} else {
 			// get a reduce task if no available map tasks
 			args := GetTaskArgs{Type: Reduce}
 			reply := GetTaskReply{}
 			err = call("Master.GetTask", &args, &reply)
-			fmt.Println(reply.Msg)
+			fmt.Printf("Worker: RPC GetTask replied '%v'\n", reply.Msg)
 			if err == nil && len(reply.Files) > 0 {
 
 				// TODO: execute the reduce task
@@ -78,9 +78,9 @@ func Worker(mapf func(string, string) []KeyValue,
 				err = updateTaskStatus(reply.Id, Reduce, status)
 
 			} else if err != nil {
-				log.Fatal("Failed to execute reduce task")
+				fmt.Printf("Worker: Failed to execute reduce task id: %v\n", reply.Id)
 			} else {
-				fmt.Println("No tasks currently available.")
+				fmt.Println("Worker: No tasks currently available.")
 				return
 			}
 		}
@@ -92,13 +92,13 @@ func updateTaskStatus(id int, t TaskType, newStatus TaskStatus) error {
 	args := UpdateTaskStatusArgs{Id: id, Type: t, NewStatus: newStatus}
 	reply := BaseReply{}
 	err := call("Master.UpdateTaskStatus", &args, &reply)
-	fmt.Println(reply.Msg)
+	fmt.Printf("Worker: RPC UpdateTaskStatus replied '%v'\n", reply.Msg)
 	return err
 }
 
 // execute a map task, given a list of files
 func executeMapTask(reply GetTaskReply, mapf func(string, string) []KeyValue) TaskStatus {
-	fmt.Printf("Map reply.Files: %v\n", reply.Files)
+	fmt.Printf("Worker: Map reply.Files: %v\n", reply.Files)
 
 	// try open file
 	file, err := os.Open(reply.Files[0])
@@ -132,7 +132,7 @@ func executeMapTask(reply GetTaskReply, mapf func(string, string) []KeyValue) Ta
 		enc := json.NewEncoder(ofileMap[reduceTaskId])
 		err := enc.Encode(kva[i])
 		if err != nil {
-			log.Fatalf("error encoding %v", kva[i])
+			fmt.Printf("Worker: error encoding %v", kva[i])
 			return Failed
 		}
 	}
@@ -144,6 +144,7 @@ func executeMapTask(reply GetTaskReply, mapf func(string, string) []KeyValue) Ta
 		os.Rename(fmt.Sprintf("mr-%v-%v-tmp", reply.Id, i), fmt.Sprintf("mr-%v-%v", reply.Id, i))
 	}
 
+	fmt.Printf("Worker: Map task id: %v complete\n", reply.Id)
 	return Succeeded
 }
 
@@ -167,11 +168,11 @@ func executeReduceTask(reply GetTaskReply, reducef func(string, []string) string
 		if !missingFiles {
 			break
 		}
-		fmt.Printf("Reduce task %v missing files. Waiting.\n", reply.Id)
+		fmt.Printf("Worker: Reduce task %v missing files. Waiting.\n", reply.Id)
 		time.Sleep(ReducePollInterval * time.Second)
 	}
 	if missingFiles {
-		fmt.Printf("Reduce task %v did not get files in time, failing.\n", reply.Id)
+		fmt.Printf("Worker: Reduce task %v did not get files in time, failing.\n", reply.Id)
 		return Failed
 	}
 
@@ -181,7 +182,7 @@ func executeReduceTask(reply GetTaskReply, reducef func(string, []string) string
 	for i := 0; i < len(reply.Files); i++ {
 		file, err := os.Open(reply.Files[i])
 		if err != nil {
-			log.Fatalf("cannot open %v", reply.Files[i])
+			log.Printf("Worker: cannot open %v", reply.Files[i])
 			return Failed
 		}
 
@@ -217,7 +218,7 @@ func executeReduceTask(reply GetTaskReply, reducef func(string, []string) string
 		i = j
 	}
 
-	fmt.Printf("Reduce task %v complete\n", reply.Id)
+	fmt.Printf("Worker: Reduce task id: %v complete\n", reply.Id)
 	return Succeeded
 }
 
