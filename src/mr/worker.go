@@ -81,7 +81,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			} else if err != nil {
 				// fmt.Printf("Worker: Failed to execute reduce task id: %v\n", reply.Id)
 			} else {
-				fmt.Println("Worker: No tasks currently available.")
+				// fmt.Println("Worker: No tasks currently available.")
 				return
 			}
 		}
