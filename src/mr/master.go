@@ -22,7 +22,7 @@ const (
 
 // how long before assuming a crash has occurred
 const (
-	TaskTimeoutTime time.Duration = (time.Second * 5)
+	TaskTimeoutTime time.Duration = (time.Second * 10)
 )
 
 type TaskType int
