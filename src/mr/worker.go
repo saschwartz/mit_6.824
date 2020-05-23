@@ -157,7 +157,7 @@ func executeMapTask(reply GetTaskReply, mapf func(string, string) []KeyValue) Ta
 		os.Rename(oldName, fmt.Sprintf("mr-%v-%v", reply.Id, i))
 	}
 
-	// fmt.Printf("Worker: Map task id: %v complete\n", reply.Id)
+	fmt.Printf("Worker: Map task id: %v complete\n", reply.Id)
 	return Succeeded
 }
 
@@ -181,11 +181,11 @@ func executeReduceTask(reply GetTaskReply, reducef func(string, []string) string
 		if !missingFiles {
 			break
 		}
-		// fmt.Printf("Worker: Reduce task %v missing files. Waiting.\n", reply.Id)
+		fmt.Printf("Worker: Reduce task %v missing files. Waiting.\n", reply.Id)
 		time.Sleep(ReducePollInterval * time.Second)
 	}
 	if missingFiles {
-		// fmt.Printf("Worker: Reduce task %v did not get files in time, failing.\n", reply.Id)
+		fmt.Printf("Worker: Reduce task %v did not get files in time, failing.\n", reply.Id)
 		return Failed
 	}
 
@@ -231,7 +231,7 @@ func executeReduceTask(reply GetTaskReply, reducef func(string, []string) string
 		i = j
 	}
 
-	// fmt.Printf("Worker: Reduce task id: %v complete\n", reply.Id)
+	fmt.Printf("Worker: Reduce task id: %v complete\n", reply.Id)
 	return Succeeded
 }
 
