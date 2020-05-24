@@ -37,17 +37,26 @@ type GetTaskArgs struct {
 }
 type GetTaskReply struct {
 	BaseReply
-	Id           int
-	Files        []string
-	NReduceTasks int
+	Id               int
+	Files            []string
+	NReduceTasks     int
+	WorkerInstanceId string
 }
 
 // UpdateTaskStatus rpc needs a task id and task type
 type UpdateTaskStatusArgs struct {
 	BaseArgs
-	Id        int
-	Type      TaskType
-	NewStatus TaskStatus
+	TaskId           int
+	Type             TaskType
+	NewStatus        TaskStatus
+	WorkerInstanceId string
+}
+
+// just need a bool to tell us whether or not all map tasks
+// are done
+type AllMapTasksCompleteReply struct {
+	BaseReply
+	AllMapTasksDone bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name

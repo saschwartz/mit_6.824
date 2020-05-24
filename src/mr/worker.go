@@ -62,7 +62,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 			// TODO: execute the map task
 			status := executeMapTask(reply, mapf)
-			err = updateTaskStatus(reply.Id, Map, status)
+			err = updateTaskStatus(reply.Id, Map, status, reply.WorkerInstanceId)
 
 		} else if err != nil {
 			// fmt.Printf("Worker: Failed to execute map task id: %v\n", reply.Id)
@@ -76,7 +76,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 				// TODO: execute the reduce task
 				status := executeReduceTask(reply, reducef)
-				err = updateTaskStatus(reply.Id, Reduce, status)
+				err = updateTaskStatus(reply.Id, Reduce, status, reply.WorkerInstanceId)
 
 			} else if err != nil {
 				// fmt.Printf("Worker: Failed to execute reduce task id: %v\n", reply.Id)
@@ -89,8 +89,8 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 // helper function to update a task status
-func updateTaskStatus(id int, t TaskType, newStatus TaskStatus) error {
-	args := UpdateTaskStatusArgs{Id: id, Type: t, NewStatus: newStatus}
+func updateTaskStatus(id int, t TaskType, newStatus TaskStatus, wId string) error {
+	args := UpdateTaskStatusArgs{TaskId: id, Type: t, NewStatus: newStatus, WorkerInstanceId: wId}
 	reply := BaseReply{}
 	err := call("Master.UpdateTaskStatus", &args, &reply)
 	// fmt.Printf("Worker: RPC UpdateTaskStatus replied '%v'\n", reply.Msg)
@@ -170,21 +170,18 @@ func executeReduceTask(reply GetTaskReply, reducef func(string, []string) string
 	// do this for ReduceWaitTime, polling at ReducePollInterval
 	// if still missing files at the end of waiting, fail the task
 	start := time.Now()
-	missingFiles := false
+	allMapTasksDone := false
 	for time.Since(start).Seconds() < ReduceWaitTime {
-		for i := 0; i < len(reply.Files); i++ {
-			if _, err := os.Stat(reply.Files[i]); os.IsNotExist(err) {
-				missingFiles = true
-				break
-			}
-		}
-		if !missingFiles {
+		mapReply := AllMapTasksCompleteReply{}
+		call("Master.UpdateTaskStatus", BaseArgs{}, &mapReply)
+		if mapReply.AllMapTasksDone {
+			allMapTasksDone = true
 			break
 		}
 		fmt.Printf("Worker: Reduce task %v missing files. Waiting.\n", reply.Id)
 		time.Sleep(ReducePollInterval * time.Second)
 	}
-	if missingFiles {
+	if !allMapTasksDone {
 		fmt.Printf("Worker: Reduce task %v did not get files in time, failing.\n", reply.Id)
 		return Failed
 	}

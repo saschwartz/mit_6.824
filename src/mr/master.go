@@ -34,11 +34,12 @@ const (
 
 // struct for getting info on a task
 type Task struct {
-	id             int
-	files          []string
-	status         TaskStatus
-	taskType       TaskType
-	executionStart time.Time
+	id               int
+	files            []string
+	status           TaskStatus
+	taskType         TaskType
+	executionStart   time.Time
+	workerInstanceId string
 }
 
 type Master struct {
@@ -93,11 +94,17 @@ func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 				// fmt.Printf("Master: timeout on task, reassigning: id %v, type: %v\n", reply.Id, args.Type)
 			}
 
+			// worker gets this, and can only update the status of a task
+			// if it has the same workerIntanceId
+			// this is to prevent old tasks overwriting
+			m.tasks[i].workerInstanceId = randAlphaString(10)
+
 			m.tasks[i].status = Running
 			m.tasks[i].executionStart = time.Now()
 			reply.Id = m.tasks[i].id
 			reply.Files = m.tasks[i].files
 			reply.NReduceTasks = m.nReduceTasks
+			reply.WorkerInstanceId = m.tasks[i].workerInstanceId
 			reply.Msg = fmt.Sprintf("RPC GetTask: task: id %v, type: %v", reply.Id, args.Type)
 			return nil
 		}
@@ -108,16 +115,29 @@ func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	return nil
 }
 
+// this lets a reduce task know whether it can start or not,
+// returns true if all map tasks done, false otherwise
+func (m *Master) AllMapTasksComplete(args *BaseArgs, reply *AllMapTasksCompleteReply) error {
+	reply.AllMapTasksDone = true
+	for i := 0; i < len(m.tasks); i++ {
+		if m.tasks[i].taskType == Map && m.tasks[i].status != Succeeded {
+			reply.AllMapTasksDone = false
+			break
+		}
+	}
+	return nil
+}
+
 // a worker calls this to update a task status
 func (m *Master) UpdateTaskStatus(args *UpdateTaskStatusArgs, reply *BaseReply) error {
 	for i := 0; i < len(m.tasks); i++ {
-		if m.tasks[i].id == args.Id && m.tasks[i].taskType == args.Type {
+		if m.tasks[i].id == args.TaskId && m.tasks[i].taskType == args.Type && m.tasks[i].workerInstanceId == args.WorkerInstanceId {
 			m.tasks[i].status = args.NewStatus
-			reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: updated task type: %v id: %v to status: %v", args.Type, args.Id, args.NewStatus)
+			reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: updated task type: %v id: %v to status: %v", args.Type, args.TaskId, args.NewStatus)
 			return nil
 		}
 	}
-	reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: no task of type: %v id: %v exists.", args.Type, args.Id)
+	reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: no task of type: %v id: %v exists with workerInstanceId %v.", args.Type, args.TaskId, args.WorkerInstanceId)
 	return nil
 }
 
