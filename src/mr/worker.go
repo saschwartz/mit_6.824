@@ -68,7 +68,10 @@ func Worker(mapf func(string, string) []KeyValue,
 			if err == nil && len(reply.Files) > 0 {
 				status := executeReduceTask(reply, reducef)
 				err = updateTaskStatus(reply.Id, Reduce, status)
-
+				// sleep a bit if the task failed
+				if status == Failed {
+					time.Sleep(time.Duration(500) * time.Millisecond)
+				}
 			} else if err != nil {
 				fmt.Printf("Worker: Failed to execute reduce task id: %v\n", reply.Id)
 			} else {
@@ -85,7 +88,7 @@ func updateTaskStatus(id int, t TaskType, newStatus TaskStatus) error {
 	args := UpdateTaskStatusArgs{TaskId: id, Type: t, NewStatus: newStatus}
 	reply := BaseReply{}
 	err := call("Master.UpdateTaskStatus", &args, &reply)
-	fmt.Printf("Worker: RPC UpdateTaskStatus replied '%v'\n", reply.Msg)
+	// fmt.Printf("Worker: RPC UpdateTaskStatus replied '%v'\n", reply.Msg)
 	return err
 }
 
@@ -100,7 +103,7 @@ func randAlphaString(length int) string {
 
 // execute a map task, given a list of files
 func executeMapTask(reply GetTaskReply, mapf func(string, string) []KeyValue) TaskStatus {
-	fmt.Printf("Worker: Map reply.Files: %v\n", reply.Files)
+	// fmt.Printf("Worker: Map reply.Files: %v\n", reply.Files)
 
 	// try open file
 	file, err := os.Open(reply.Files[0])
