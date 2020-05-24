@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
 	"time"
 )
+
+var mutex = &sync.Mutex{}
 
 // task status and type enums
 type TaskStatus int
@@ -70,9 +73,11 @@ func (m *Master) server() {
 //
 func (m *Master) Done() bool {
 	for i := 0; i < len(m.tasks); i++ {
+		mutex.Lock()
 		if m.tasks[i].status != Succeeded {
 			return false
 		}
+		mutex.Unlock()
 	}
 	fmt.Println("Job complete.")
 	return true
@@ -84,23 +89,23 @@ func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 
 	// search for a task
 	for i := 0; i < len(m.tasks); i++ {
+
+		mutex.Lock()
 		task := m.tasks[i]
 
 		if task.taskType == args.Type &&
 			(task.status == Pending || task.status == Failed ||
 				time.Now().Sub(task.executionStart) > TaskTimeoutTime) {
 
-			if time.Now().Sub(task.executionStart) > TaskTimeoutTime {
-				// fmt.Printf("Master: timeout on task, reassigning: id %v, type: %v\n", reply.Id, args.Type)
-			}
-
 			// worker gets this, and can only update the status of a task
 			// if it has the same workerIntanceId
 			// this is to prevent old tasks overwriting
 			m.tasks[i].workerInstanceId = randAlphaString(10)
 
+			// task started now
 			m.tasks[i].status = Running
 			m.tasks[i].executionStart = time.Now()
+
 			reply.Id = m.tasks[i].id
 			reply.Files = m.tasks[i].files
 			reply.NReduceTasks = m.nReduceTasks
@@ -108,6 +113,7 @@ func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 			reply.Msg = fmt.Sprintf("RPC GetTask: task: id %v, type: %v", reply.Id, args.Type)
 			return nil
 		}
+		mutex.Unlock()
 	}
 
 	// no task available
@@ -120,10 +126,12 @@ func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 func (m *Master) AllMapTasksComplete(args *BaseArgs, reply *AllMapTasksCompleteReply) error {
 	reply.AllMapTasksDone = true
 	for i := 0; i < len(m.tasks); i++ {
+		mutex.Lock()
 		if m.tasks[i].taskType == Map && m.tasks[i].status != Succeeded {
 			reply.AllMapTasksDone = false
 			break
 		}
+		mutex.Unlock()
 	}
 	return nil
 }
@@ -131,11 +139,13 @@ func (m *Master) AllMapTasksComplete(args *BaseArgs, reply *AllMapTasksCompleteR
 // a worker calls this to update a task status
 func (m *Master) UpdateTaskStatus(args *UpdateTaskStatusArgs, reply *BaseReply) error {
 	for i := 0; i < len(m.tasks); i++ {
+		mutex.Lock()
 		if m.tasks[i].id == args.TaskId && m.tasks[i].taskType == args.Type && m.tasks[i].workerInstanceId == args.WorkerInstanceId {
 			m.tasks[i].status = args.NewStatus
 			reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: updated task type: %v id: %v to status: %v", args.Type, args.TaskId, args.NewStatus)
 			return nil
 		}
+		mutex.Unlock()
 	}
 	reply.Msg = fmt.Sprintf("RPC UpdateTaskStatus: no task of type: %v id: %v exists with workerInstanceId %v.", args.Type, args.TaskId, args.WorkerInstanceId)
 	return nil

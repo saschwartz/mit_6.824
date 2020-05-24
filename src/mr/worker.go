@@ -21,13 +21,6 @@ type KeyValue struct {
 	Value string
 }
 
-// parameters for how long a reduce task should wait
-// for all the necessary files to become available
-const (
-	ReduceWaitTime     float64       = 3.0
-	ReducePollInterval time.Duration = 1.0
-)
-
 //
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -57,32 +50,33 @@ func Worker(mapf func(string, string) []KeyValue,
 		args := GetTaskArgs{Type: Map}
 		reply := GetTaskReply{}
 		err := call("Master.GetTask", &args, &reply)
-		// fmt.Printf("Worker: RPC GetTask replied '%v'\n", reply.Msg)
-		if err == nil && len(reply.Files) > 0 {
+		fmt.Printf("Worker: RPC GetTask replied '%v'\n", reply.Msg)
 
-			// TODO: execute the map task
+		// execute the map task
+		if err == nil && len(reply.Files) > 0 {
 			status := executeMapTask(reply, mapf)
 			err = updateTaskStatus(reply.Id, Map, status, reply.WorkerInstanceId)
 
 		} else if err != nil {
-			// fmt.Printf("Worker: Failed to execute map task id: %v\n", reply.Id)
+			fmt.Printf("Worker: Failed to execute map task id: %v\n", reply.Id)
 		} else {
 			// get a reduce task if no available map tasks
 			args := GetTaskArgs{Type: Reduce}
 			reply := GetTaskReply{}
 			err = call("Master.GetTask", &args, &reply)
-			// fmt.Printf("Worker: RPC GetTask replied '%v'\n", reply.Msg)
-			if err == nil && len(reply.Files) > 0 {
+			fmt.Printf("Worker: RPC GetTask replied '%v'\n", reply.Msg)
 
-				// TODO: execute the reduce task
+			// execute the reduce task
+			if err == nil && len(reply.Files) > 0 {
 				status := executeReduceTask(reply, reducef)
 				err = updateTaskStatus(reply.Id, Reduce, status, reply.WorkerInstanceId)
 
 			} else if err != nil {
-				// fmt.Printf("Worker: Failed to execute reduce task id: %v\n", reply.Id)
+				fmt.Printf("Worker: Failed to execute reduce task id: %v\n", reply.Id)
 			} else {
-				// fmt.Println("Worker: No tasks currently available.")
-				return
+				// sleep before polling get task again
+				fmt.Println("Worker: No tasks currently available.")
+				time.Sleep(time.Duration(50) * time.Millisecond)
 			}
 		}
 	}
@@ -93,7 +87,7 @@ func updateTaskStatus(id int, t TaskType, newStatus TaskStatus, wId string) erro
 	args := UpdateTaskStatusArgs{TaskId: id, Type: t, NewStatus: newStatus, WorkerInstanceId: wId}
 	reply := BaseReply{}
 	err := call("Master.UpdateTaskStatus", &args, &reply)
-	// fmt.Printf("Worker: RPC UpdateTaskStatus replied '%v'\n", reply.Msg)
+	fmt.Printf("Worker: RPC UpdateTaskStatus replied '%v'\n", reply.Msg)
 	return err
 }
 
@@ -108,7 +102,7 @@ func randAlphaString(length int) string {
 
 // execute a map task, given a list of files
 func executeMapTask(reply GetTaskReply, mapf func(string, string) []KeyValue) TaskStatus {
-	// fmt.Printf("Worker: Map reply.Files: %v\n", reply.Files)
+	fmt.Printf("Worker: Map reply.Files: %v\n", reply.Files)
 
 	// try open file
 	file, err := os.Open(reply.Files[0])
@@ -167,22 +161,10 @@ func executeReduceTask(reply GetTaskReply, reducef func(string, []string) string
 	ofile, _ := os.Create(fmt.Sprintf("mr-out-%v", reply.Id))
 
 	// check we have all our files.
-	// do this for ReduceWaitTime, polling at ReducePollInterval
-	// if still missing files at the end of waiting, fail the task
-	start := time.Now()
-	allMapTasksDone := false
-	for time.Since(start).Seconds() < ReduceWaitTime {
-		mapReply := AllMapTasksCompleteReply{}
-		call("Master.UpdateTaskStatus", BaseArgs{}, &mapReply)
-		if mapReply.AllMapTasksDone {
-			allMapTasksDone = true
-			break
-		}
-		fmt.Printf("Worker: Reduce task %v missing files. Waiting.\n", reply.Id)
-		time.Sleep(ReducePollInterval * time.Second)
-	}
-	if !allMapTasksDone {
-		fmt.Printf("Worker: Reduce task %v did not get files in time, failing.\n", reply.Id)
+	mapReply := AllMapTasksCompleteReply{}
+	call("Master.AllMapTasksComplete", BaseArgs{}, &mapReply)
+	if !mapReply.AllMapTasksDone {
+		fmt.Printf("Worker: Reduce task %v missing some files, failing.\n", reply.Id)
 		return Failed
 	}
 
