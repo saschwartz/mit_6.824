@@ -93,7 +93,7 @@ func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 
 		if m.tasks[i].taskType == args.Type &&
 			(m.tasks[i].status == Pending || m.tasks[i].status == Failed ||
-				time.Now().Sub(m.tasks[i].executionStart) > TaskTimeoutTime) {
+				(m.tasks[i].status == Running && time.Now().Sub(m.tasks[i].executionStart) > TaskTimeoutTime)) {
 
 			// task started now
 			m.tasks[i].status = Running
