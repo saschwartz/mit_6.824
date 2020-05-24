@@ -50,12 +50,11 @@ func Worker(mapf func(string, string) []KeyValue,
 		args := GetTaskArgs{Type: Map}
 		reply := GetTaskReply{}
 		err := call("Master.GetTask", &args, &reply)
-		fmt.Printf("Worker: RPC GetTask replied '%v'\n", reply.Msg)
 
 		// execute the map task
 		if err == nil && len(reply.Files) > 0 {
 			status := executeMapTask(reply, mapf)
-			err = updateTaskStatus(reply.Id, Map, status, reply.WorkerInstanceId)
+			err = updateTaskStatus(reply.Id, Map, status)
 
 		} else if err != nil {
 			fmt.Printf("Worker: Failed to execute map task id: %v\n", reply.Id)
@@ -64,27 +63,26 @@ func Worker(mapf func(string, string) []KeyValue,
 			args := GetTaskArgs{Type: Reduce}
 			reply := GetTaskReply{}
 			err = call("Master.GetTask", &args, &reply)
-			fmt.Printf("Worker: RPC GetTask replied '%v'\n", reply.Msg)
 
 			// execute the reduce task
 			if err == nil && len(reply.Files) > 0 {
 				status := executeReduceTask(reply, reducef)
-				err = updateTaskStatus(reply.Id, Reduce, status, reply.WorkerInstanceId)
+				err = updateTaskStatus(reply.Id, Reduce, status)
 
 			} else if err != nil {
 				fmt.Printf("Worker: Failed to execute reduce task id: %v\n", reply.Id)
 			} else {
 				// sleep before polling get task again
 				fmt.Println("Worker: No tasks currently available.")
-				time.Sleep(time.Duration(50) * time.Millisecond)
+				time.Sleep(time.Duration(500) * time.Millisecond)
 			}
 		}
 	}
 }
 
 // helper function to update a task status
-func updateTaskStatus(id int, t TaskType, newStatus TaskStatus, wId string) error {
-	args := UpdateTaskStatusArgs{TaskId: id, Type: t, NewStatus: newStatus, WorkerInstanceId: wId}
+func updateTaskStatus(id int, t TaskType, newStatus TaskStatus) error {
+	args := UpdateTaskStatusArgs{TaskId: id, Type: t, NewStatus: newStatus}
 	reply := BaseReply{}
 	err := call("Master.UpdateTaskStatus", &args, &reply)
 	fmt.Printf("Worker: RPC UpdateTaskStatus replied '%v'\n", reply.Msg)

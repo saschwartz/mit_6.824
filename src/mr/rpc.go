@@ -37,19 +37,17 @@ type GetTaskArgs struct {
 }
 type GetTaskReply struct {
 	BaseReply
-	Id               int
-	Files            []string
-	NReduceTasks     int
-	WorkerInstanceId string
+	Id           int
+	Files        []string
+	NReduceTasks int
 }
 
 // UpdateTaskStatus rpc needs a task id and task type
 type UpdateTaskStatusArgs struct {
 	BaseArgs
-	TaskId           int
-	Type             TaskType
-	NewStatus        TaskStatus
-	WorkerInstanceId string
+	TaskId    int
+	Type      TaskType
+	NewStatus TaskStatus
 }
 
 // just need a bool to tell us whether or not all map tasks
