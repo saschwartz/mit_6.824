@@ -21,6 +21,11 @@ type KeyValue struct {
 	Value string
 }
 
+// how long to wait between task polls
+const (
+	PollInterval time.Duration = time.Duration(1500) * time.Millisecond
+)
+
 //
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -55,7 +60,10 @@ func Worker(mapf func(string, string) []KeyValue,
 		if err == nil && len(reply.Files) > 0 {
 			status := executeMapTask(reply, mapf)
 			err = updateTaskStatus(reply.Id, Map, status)
-
+			// sleep a bit if the task failed
+			if status == Failed {
+				time.Sleep(PollInterval)
+			}
 		} else if err != nil {
 			fmt.Printf("Worker: Failed to execute map task id: %v\n", reply.Id)
 		} else {
@@ -70,14 +78,14 @@ func Worker(mapf func(string, string) []KeyValue,
 				err = updateTaskStatus(reply.Id, Reduce, status)
 				// sleep a bit if the task failed
 				if status == Failed {
-					time.Sleep(time.Duration(500) * time.Millisecond)
+					time.Sleep(PollInterval)
 				}
 			} else if err != nil {
 				fmt.Printf("Worker: Failed to execute reduce task id: %v\n", reply.Id)
 			} else {
 				// sleep before polling get task again
 				fmt.Println("Worker: No tasks currently available.")
-				time.Sleep(time.Duration(500) * time.Millisecond)
+				time.Sleep(PollInterval)
 			}
 		}
 	}
