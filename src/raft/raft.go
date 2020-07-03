@@ -17,14 +17,15 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "sync/atomic"
-import "../labrpc"
+import (
+	"sync"
+	"sync/atomic"
+
+	"../labrpc"
+)
 
 // import "bytes"
 // import "../labgob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -44,6 +45,12 @@ type ApplyMsg struct {
 }
 
 //
+// Struct for info about a single log entry
+//
+type LogEntry struct {
+}
+
+//
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
@@ -56,7 +63,11 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
+	currentTerm int        // latest term server has seen
+	votedFor    int        // candidateId that received vote from this server in current term (else -1)
+	log         []LogEntry // list of log entries
+	commitIndex int        // index of highest log entry known to be committed
+	lastApplied int        // index of highest log entry applied to state machine
 }
 
 // return currentTerm and whether this server
@@ -85,7 +96,6 @@ func (rf *Raft) persist() {
 	// rf.persister.SaveRaftState(data)
 }
 
-
 //
 // restore previously persisted state.
 //
@@ -108,34 +118,34 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-
-
 //
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
+// RequestVote RPC arguments structure.
 //
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
+	CandidateTerm int
+	CandidateId   int
+	LastLogIndex  int // index of candidate’s last log entry
+	lastLogTerm   int // term of candidate’s last log entry
 }
 
 //
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
+// RequestVote RPC reply structure.
 //
 type RequestVoteReply struct {
-	// Your data here (2A).
+	CurrentTerm int  // highest term known by receiver
+	VoteGranted bool // did receiver vote for us or not
 }
 
 //
-// example RequestVote RPC handler.
+// RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
+	// TODO
+	reply.VoteGranted = true
 }
 
 //
-// example code to send a RequestVote RPC to a server.
+// code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
 // fills in *reply with RPC reply, so caller should
@@ -168,6 +178,24 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+//
+// AppendEntries RPC arguments structure.
+//
+type AppendEntriesArgs struct {
+}
+
+//
+// AppendEntries RPC reply structure.
+//
+type AppendEntriesReply struct {
+}
+
+//
+// AppendEntries RPC handler.
+//
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// TODO
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -189,7 +217,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -237,7 +264,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 
 	return rf
 }
