@@ -29,6 +29,7 @@ import (
 // import "bytes"
 // import "../labgob"
 
+// ApplyMsg indicates a log entry was committed
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -46,16 +47,14 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
-//
-// Struct for info about a single log entry
+// LogEntry is a struct for info about a single log entry
 //
 type LogEntry struct {
 	Index int // log index
 	Term  int // the term of the leader when this log was stored
 }
 
-//
-// A Go object implementing a single Raft peer.
+// Raft is a Go object implementing a single Raft peer.
 //
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -82,12 +81,18 @@ type Raft struct {
 	electionTimeout time.Duration
 }
 
-// how often to poll for election timeout, and the election parameters
+// ElectionTimeoutPollInterval is how often to poll for election timeout, and the election parameters
 const ElectionTimeoutPollInterval = time.Duration(50) * time.Millisecond
+
+// MinElectionTimeout gives the lower bound on the randomly generated
+// election timeout window
 const MinElectionTimeout = 500
+
+// MaxElectionTimeout gives the upper bound on the randomly generated
+// election timeout window
 const MaxElectionTimeout = 1000
 
-// return currentTerm and whether this server
+// GetState returns currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.isLeader
@@ -131,8 +136,7 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-//
-// RequestVote RPC arguments structure.
+// RequestVoteArgs is the args structure for RequestVote RPC
 //
 type RequestVoteArgs struct {
 	CandidateTerm int
@@ -141,8 +145,7 @@ type RequestVoteArgs struct {
 	lastLogTerm   int // term of candidate’s last log entry
 }
 
-//
-// RequestVote RPC reply structure.
+// RequestVoteReply is the reply structure for RequestVote RPC
 //
 type RequestVoteReply struct {
 	CurrentTerm int  // highest term known by receiver
@@ -211,8 +214,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-//
-// AppendEntries RPC arguments structure.
+// AppendEntriesArgs is the args structure for AppendEntries RPC
 //
 type AppendEntriesArgs struct {
 	LeaderTerm        int        // the current leader's term according to request
@@ -223,8 +225,7 @@ type AppendEntriesArgs struct {
 	LeaderCommitIndex int        // the leader's commit index
 }
 
-//
-// AppendEntries RPC reply structure.
+// AppendEntriesReply is the reply structure for AppendEntries RPC
 //
 type AppendEntriesReply struct {
 	CurrentTerm int  // the current term of the server that was hit (for leader to update if needed)
@@ -264,8 +265,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+// Start starts a raft server
 //
-// the service using Raft (e.g. a k/v server) wants to start
+// this happens when the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
 // agreement and return immediately. there is no guarantee that this
@@ -288,6 +290,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
+// Kill kills a raft server
 //
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
@@ -309,12 +312,13 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-// get a random election timeout window
+// GetRandomElectionTimeout gets a random election timeout window
 func GetRandomElectionTimeout() time.Duration {
 	return time.Duration(MinElectionTimeout+rand.Intn(MaxElectionTimeout-MinElectionTimeout)) * time.Millisecond
 }
 
-// for a Raft server, continually runs a check as to whether sending
+// ElectionTimeoutCheck implements election timeout
+// for a Raft server, by continually runs a check as to whether sending
 // out RequestVote is needed due to heartbeat timeout
 func ElectionTimeoutCheck(rf *Raft) {
 	for {
@@ -323,7 +327,7 @@ func ElectionTimeoutCheck(rf *Raft) {
 			time.Sleep(ElectionTimeoutPollInterval)
 			rf.electionTimeout -= ElectionTimeoutPollInterval
 		} else {
-			// TODO - handle timeout
+			// TODO - election needs to occur
 			rf.mu.Unlock()
 			return
 		}
@@ -331,6 +335,19 @@ func ElectionTimeoutCheck(rf *Raft) {
 	}
 }
 
+// RunElection turns a Raft server into a candidate
+// and executes the election procedure
+func RunElection(rf *Raft) {
+	rf.mu.Lock()
+	rf.currentTerm++
+	for idx := range rf.peers {
+		args := &RequestVoteArgs{}
+		reply := &RequestVoteReply{}
+		rf.sendRequestVote(idx, args, reply)
+	}
+}
+
+// Make creates a raft server
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
