@@ -435,7 +435,6 @@ func (rf *Raft) RunElection() {
 			if votes >= int(math.Ceil(float64(len(rf.peers))/2.0)) {
 				fmt.Printf("Server %d elected leader\n", rf.me)
 				rf.state = Leader
-				fmt.Printf("Server %v state: %v\n", rf.me, rf.state)
 				defer rf.SendHeartbeat()
 				rf.mu.Unlock()
 				return
