@@ -60,9 +60,9 @@ type LogEntry struct {
 type serverState int
 
 const (
-	Leader    serverState = iota
-	Follower  serverState = iota
-	Candidate serverState = iota
+	Leader serverState = iota
+	Follower
+	Candidate
 )
 
 // Raft is a Go object implementing a single Raft peer.
@@ -105,6 +105,24 @@ const MinElectionTimeout = 1000
 // MaxElectionTimeout gives the upper bound on the randomly generated
 // election timeout window in ms
 const MaxElectionTimeout = 2500
+
+// log level state types and consts
+type LogLevel int
+
+const (
+	LogDebug LogLevel = iota
+	LogInfo
+	LogWarning
+	LogError
+)
+
+func (me LogLevel) String() string {
+	return [...]string{"Debug", "Info", "Warning", "Error"}[me]
+}
+
+const (
+	SetLogLevel LogLevel = LogInfo
+)
 
 // GetState returns currentTerm and whether this server
 // believes it is the leader.
@@ -189,7 +207,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 	}
 
-	rf.Log("Received RequestVote from server", args.CandidateId, "- term", args.CandidateTerm, "- outcome:", reply.VoteGranted)
+	rf.Log(LogDebug, "Received RequestVote from server", args.CandidateId, "- term", args.CandidateTerm, "- outcome:", reply.VoteGranted)
 
 	// update currentTerm if candidate has higher term
 	if args.CandidateTerm > rf.currentTerm {
@@ -278,7 +296,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	rf.Log("Received AppendEntries from server", args.LeaderId, "- term", args.LeaderTerm, "- outcome:", reply.Success)
+	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderId, "- term", args.LeaderTerm, "- outcome:", reply.Success)
 
 	// update currentTerm if request has higher term
 	if args.LeaderTerm > rf.currentTerm {
@@ -362,11 +380,11 @@ func (rf *Raft) HeartbeatTimeoutCheck() {
 			currentTime := time.Now()
 			rf.electionTimeout -= (currentTime.Sub(lastHeartbeatCheck))
 			lastHeartbeatCheck = currentTime
-			rf.Log("timeout remaining:", rf.electionTimeout)
+			rf.Log(LogDebug, "timeout remaining:", rf.electionTimeout)
 		} else if rf.state == Follower {
 			// election needs to occur
 			// quit this function and run the election
-			rf.Log("timed out as follower, running election.")
+			rf.Log(LogInfo, "timed out as follower, running election.")
 			rf.mu.Unlock()
 			defer rf.RunElection()
 			return
@@ -406,7 +424,7 @@ func (rf *Raft) RunElection() {
 
 	rf.mu.Lock()
 	rf.currentTerm++
-	rf.Log("running as candidate")
+	rf.Log(LogInfo, "running as candidate")
 
 	// set as candidate state and vote for ourselves,
 	// also reset the timer
@@ -434,7 +452,7 @@ func (rf *Raft) RunElection() {
 	for {
 		rf.mu.Lock()
 		if rf.state == Follower {
-			rf.Log("now a follower")
+			rf.Log(LogInfo, "now a follower")
 			// we must have received a heartbeat message from a new leader
 			// stop the election
 			rf.mu.Unlock()
@@ -454,7 +472,7 @@ func (rf *Raft) RunElection() {
 			// majority vote achieved - set state as leader and
 			// start sending heartbeats
 			if votes >= int(math.Ceil(float64(len(rf.peers))/2.0)) {
-				rf.Log("elected leader")
+				rf.Log(LogInfo, "elected leader")
 				rf.state = Leader
 				rf.mu.Unlock()
 				defer rf.SendHeartbeat()
@@ -462,7 +480,7 @@ func (rf *Raft) RunElection() {
 			}
 		} else {
 			// no result - need to rerun election
-			rf.Log("timed out as candidate")
+			rf.Log(LogInfo, "timed out as candidate")
 			rf.mu.Unlock()
 			defer rf.RunElection()
 			return
@@ -510,9 +528,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // Log wraps fmt.Printf
 // in order to log only when an instance hasn't been killed
-func (rf *Raft) Log(a ...interface{}) {
-	if !rf.killed() {
-		data := append([]interface{}{"[ Server", rf.me, "- term", rf.currentTerm, "]"}, a...)
+func (rf *Raft) Log(level LogLevel, a ...interface{}) {
+	if !rf.killed() && level >= SetLogLevel {
+		data := append([]interface{}{level, "[ Server", rf.me, "- term", rf.currentTerm, "]"}, a...)
 		fmt.Println(data...)
 	}
 }
