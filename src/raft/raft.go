@@ -85,8 +85,8 @@ type Raft struct {
 
 	// leader specific state
 	state      serverState
-	nextIndex  int
-	matchIndex int
+	nextIndex  []int // next log index to send to each server
+	matchIndex []int // for each server, index of highest log entry known to be replicated on that server
 
 	// election timeout for follower
 	electionTimeout time.Duration
@@ -282,7 +282,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderTerm < rf.currentTerm {
 		// leader out of date
 		reply.Success = false
-
+	} else if args.PrevLogIndex >= 0 &&
+		(len(rf.log) < args.PrevLogIndex || rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
+		// prev log is incorrect, need to roll back
+		reply.Success = false
 	} else {
 		reply.Success = true
 		// reset election timeout
@@ -293,6 +296,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.state != Follower {
 			rf.state = Follower
 			go rf.HeartbeatTimeoutCheck()
+		}
+
+		// delete any conflicting log entries and append new ones
+		for _, e := range args.LogEntries {
+			// need to remove all entries from this point onwards inclusive
+			if e.Index < len(rf.log) && rf.log[e.Index-1].Term != e.Term {
+				rf.log = rf.log[:e.Index-1]
+			}
+			// append current entry
+			rf.log = append(rf.log, e)
+		}
+
+		// update commit index
+		if args.LeaderCommitIndex > rf.commitIndex {
+			rf.commitIndex = Min(args.LeaderCommitIndex, args.LogEntries[len(args.LogEntries)-1].Index)
 		}
 	}
 
@@ -308,9 +326,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // function to call the AppendEntries RPC
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	rf.mu.Lock()
+
+	// these are always just grabbed from rf
 	args.LeaderId = rf.me
 	args.LeaderTerm = rf.currentTerm
 	args.LeaderCommitIndex = rf.commitIndex
+
+	// figure out prevLogIndex and prevLogTerm based on entries passed in
+	if len(args.LogEntries) > 0 && len(rf.log) > 0 {
+		args.PrevLogIndex = args.LogEntries[0].Index - 1
+		args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
+	}
+
 	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
@@ -332,13 +359,26 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
 
-	// Your code here (2B).
+	// server is not the leader, return false immediately
+	if rf.state != Leader {
+		return -1, -1, false
+	}
 
-	return index, term, isLeader
+	// send out appendEntries concurrently if leader
+	for idx := range rf.peers {
+		if idx != rf.me {
+			args := &AppendEntriesArgs{
+				LogEntries: []LogEntry{
+					LogEntry{Index: rf.commitIndex + 1, Term: rf.currentTerm},
+				},
+			}
+			reply := &AppendEntriesReply{}
+			go rf.sendAppendEntries(idx, args, reply)
+		}
+	}
+
+	return rf.commitIndex + 1, rf.currentTerm, true
 }
 
 // Kill kills a raft server
@@ -507,11 +547,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf := &Raft{}
 
 	rf.mu.Lock()
+
+	// default initial state for all servers
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 	rf.state = Follower
 	rf.votedFor = -1
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+
+	// default initial state for leader
+	for range rf.peers {
+		rf.nextIndex = append(rf.nextIndex, 1)
+		rf.matchIndex = append(rf.matchIndex, 0)
+	}
 
 	// set election timeout randomly
 	rf.electionTimeout = GetRandomElectionTimeout()
