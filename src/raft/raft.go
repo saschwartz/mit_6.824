@@ -87,9 +87,10 @@ type Raft struct {
 	lastApplied int        // index of highest log entry applied to state machine
 
 	// leader specific state
-	state      serverState
-	nextIndex  []int // next log index to send to each server
-	matchIndex []int // for each server, index of highest log entry known to be replicated on that server
+	state              serverState
+	nextIndex          []int // next log index to send to each server
+	matchIndex         []int // for each server, index of highest log entry known to be replicated on that server
+	inAgreementProcess bool  // we are currently in the process of agreeing... helps avoid duplicate Start calls
 
 	// election timeout for follower
 	electionTimeout time.Duration
@@ -127,7 +128,7 @@ func (me LogLevel) String() string {
 }
 
 const (
-	SetLogLevel LogLevel = LogInfo
+	SetLogLevel LogLevel = LogDebug
 )
 
 // GetState returns currentTerm and whether this server
@@ -226,7 +227,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 	}
 
-	rf.Log(LogDebug, "Received RequestVote from server", args.CandidateId, "- term", args.CandidateTerm, "- outcome:", reply.VoteGranted)
+	rf.Log(LogDebug, "Received RequestVote from server", args.CandidateId, "term", args.CandidateTerm, "\n- args.LastLogIndex", args.LastLogIndex, "\n- args.lastLogTerm", args.LastLogTerm, "\n- rf.log", rf.log, "\n- rf.votedFor", rf.votedFor, "\n- VoteGranted:", reply.VoteGranted)
 
 	// update currentTerm if candidate has higher term
 	if args.CandidateTerm > rf.currentTerm {
@@ -332,7 +333,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// delete any conflicting log entries and append new ones
 		for _, e := range args.LogEntries {
 			// need to remove all entries from this point onwards inclusive
-			if e.Index < len(rf.log) && rf.log[e.Index-1].Term != e.Term {
+			if e.Index <= len(rf.log) && rf.log[e.Index-1].Term != e.Term {
 				rf.log = rf.log[:e.Index-1]
 			}
 			// append current entry
@@ -420,27 +421,22 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.Log(LogDebug, "Start called")
-
 	// server is not the leader, return false immediately
 	if rf.state != Leader {
-		rf.Log(LogDebug, "Start return false: not a leader")
 		return -1, -1, false
 	}
 
 	// the entry to add
 	entry := LogEntry{
-		Index:   rf.commitIndex + 1,
+		Index:   len(rf.log) + 1,
 		Term:    rf.currentTerm,
 		Command: command,
 	}
 
-	// commit the entry to servers
+	// start agree routine and return immediately
 	rf.log = append(rf.log, entry)
 	go rf.MakeAgreeUpToEntry(entry)
-
-	// expected index is 1 after the current index
-	return rf.commitIndex + 1, rf.currentTerm, true
+	return entry.Index, entry.Term, true
 }
 
 // MakeAgreeUpToEntry takes an entry to add to the system,
@@ -454,7 +450,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // returns true on success, false on failure
 //
 func (rf *Raft) MakeAgreeUpToEntry(entry LogEntry) bool {
-	rf.Log(LogDebug, "Start sending append entries requests to peers")
+	rf.Log(LogDebug, "Starting agreement to log:", rf.log)
 
 	// make server -> reply map
 	// and send initial requests (with just the single log entry)
@@ -481,7 +477,7 @@ func (rf *Raft) MakeAgreeUpToEntry(entry LogEntry) bool {
 
 					// we might have found out we shouldn't be the leader!
 					if replies[idx].CurrentTerm > rf.currentTerm {
-						rf.Log(LogDebug, "Found out we shoudl not be the leader! Changing to follower")
+						rf.Log(LogDebug, "Found out we should not be the leader! Changing to follower")
 						rf.state = Follower
 						rf.mu.Unlock()
 						return false
@@ -489,7 +485,7 @@ func (rf *Raft) MakeAgreeUpToEntry(entry LogEntry) bool {
 
 					// failure, roll back nextIndex and resend
 					rf.nextIndex[idx]--
-					rf.Log(LogDebug, "Failed to AppendEntries to server", idx, "for entry idx", entry.Index, " - rolling back to idx", rf.nextIndex[idx])
+					rf.Log(LogDebug, "Failed to AppendEntries to server", idx, "- rolling back to idx", rf.nextIndex[idx])
 					replies[idx] = &AppendEntriesReply{}
 					args := &AppendEntriesArgs{LogEntries: rf.log[rf.nextIndex[idx]:]}
 					go rf.sendAppendEntries(idx, args, replies[idx])
@@ -498,21 +494,23 @@ func (rf *Raft) MakeAgreeUpToEntry(entry LogEntry) bool {
 		}
 
 		// update commit idx if need be
-		// also notify the applyCh
+		// also notify the applyCh message by message
 		if replicated >= int(math.Ceil(float64(len(rf.peers))/2.0)) &&
 			rf.commitIndex < entry.Index {
-			rf.Log(LogDebug, "Entry idx", entry.Index, "replicated on majority, new commit idx:", rf.commitIndex+1)
-			rf.commitIndex++
-			rf.applyCh <- ApplyMsg{
-				CommandValid: true,
-				CommandIndex: rf.commitIndex,
-				Command:      rf.log[rf.commitIndex-1].Command,
+			for rf.commitIndex < entry.Index {
+				rf.commitIndex++
+				rf.Log(LogInfo, "entry", entry, "replicated on majority, new commit idx:", rf.commitIndex)
+				rf.applyCh <- ApplyMsg{
+					CommandValid: true,
+					CommandIndex: rf.commitIndex,
+					Command:      rf.log[rf.commitIndex-1].Command,
+				}
 			}
 		}
 
 		// we're done!
 		if replicated == len(rf.peers) {
-			rf.Log(LogDebug, "Entry idx", entry.Index, "replicated on all servers")
+			rf.Log(LogInfo, "entry", entry, "replicated on all servers")
 			rf.mu.Unlock()
 			return true
 		}
@@ -627,6 +625,7 @@ func (rf *Raft) RunElection() {
 			args := &RequestVoteArgs{}
 			reply := &RequestVoteReply{}
 			replies[idx] = reply
+			rf.Log(LogDebug, "Sending RequestVote to server", idx)
 			go rf.sendRequestVote(idx, args, reply)
 		}
 	}
