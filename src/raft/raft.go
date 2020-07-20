@@ -127,7 +127,7 @@ func (me LogLevel) String() string {
 }
 
 const (
-	SetLogLevel LogLevel = LogDebug
+	SetLogLevel LogLevel = LogInfo
 )
 
 // GetState returns currentTerm and whether this server
@@ -191,6 +191,17 @@ type RequestVoteReply struct {
 	VoteGranted bool // did receiver vote for us or not
 }
 
+// LogUpToDate returns true if a log with LastLogIndex and LastLogTerm
+// is at least as up to date as log
+// else false
+func LogUpToDate(lastIndex int, lastTerm int, log []LogEntry) bool {
+	if len(log) == 0 {
+		return false
+	}
+	lastEntry := log[len(log)-1]
+	return lastTerm >= lastEntry.Term && lastIndex >= len(log)
+}
+
 //
 // RequestVote RPC handler.
 //
@@ -202,10 +213,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.CandidateTerm < rf.currentTerm {
 		reply.VoteGranted = false
 	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) ||
-		args.CandidateTerm > rf.currentTerm && rf.state != Leader {
+		args.CandidateTerm > rf.currentTerm &&
+			rf.state != Leader &&
+			LogUpToDate(args.LastLogIndex, args.LastLogTerm, rf.log) {
 		// grant vote, if candidate is at right term and we haven't voted
 		// for anyone else yet, and this server isn't the leader
-		// TODO - check candidate log is at least as up to date as us
+		// and also check candidate log is at least as up to date as us
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	} else {
@@ -320,12 +333,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.LeaderCommitIndex > rf.commitIndex {
 
 			// walk up through messages to min of leader commit idx,
-			// and idx of last log entry added.
+			// and idx of last log entry added. also stop if we are past the
+			// number of actual messages in our log
 			// for each message, send acknowledgement to applyCh and
 			// update this server's commit idx
 			idx := rf.commitIndex + 1
 			for idx <= args.LeaderCommitIndex &&
-				(len(args.LogEntries) == 0 || idx < args.LogEntries[len(args.LogEntries)-1].Index) {
+				(len(args.LogEntries) == 0 || idx <= args.LogEntries[len(args.LogEntries)-1].Index) &&
+				idx <= len(rf.log) {
 				// send acknowledgement to applyCh
 				rf.applyCh <- ApplyMsg{
 					CommandValid: true,
@@ -340,7 +355,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderId, "- term", args.LeaderTerm, "- logs to add:", len(args.LogEntries), "- outcome:", reply.Success)
+	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderId, "term", args.LeaderTerm, "\n - args.LogEntries:", args.LogEntries, "\n - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n - rf.log", rf.log, "\n - rf.commitIndex", rf.commitIndex, "\n - success:", reply.Success)
 
 	// update currentTerm if request has higher term
 	if args.LeaderTerm > rf.currentTerm {
@@ -410,64 +425,93 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 
-	// send out appendEntries concurrently if leader
-	rf.Log(LogDebug, "Start sending append entries requests to peers")
-	replies := []*AppendEntriesReply{}
-	for idx := range rf.peers {
-		if idx != rf.me {
-			args := &AppendEntriesArgs{LogEntries: []LogEntry{entry}}
-			reply := &AppendEntriesReply{}
-			replies = append(replies, reply)
-			go rf.sendAppendEntries(idx, args, reply)
-		}
-	}
-
-	// append to leader log and start routine for leader
-	// to check whether to update commit index
+	// commit the entry to servers
 	rf.log = append(rf.log, entry)
-	go rf.CommitIfEnoughReplies(replies, rf.commitIndex+1)
+	go rf.MakeAgreeUpToEntry(entry)
 
 	// expected index is 1 after the current index
 	return rf.commitIndex + 1, rf.currentTerm, true
 }
 
-// CommitIfEnoughReplies takes replies to a bunch of
-// AppendEntries RPCs, and updates the leader commit index
-// to idx if enough successful replies have come back
-// returns whether the commit succeeded
-func (rf *Raft) CommitIfEnoughReplies(replies []*AppendEntriesReply, idx int) bool {
+// MakeAgreeUpToEntry takes an entry to add to the system,
+// and continually sends the AppendEntries requests necessary to eventually
+// make all rafts logs agree up to that entry (stronger than commit!)
+//
+// This means
+// - sending out the new entry to be added
+// - if we receive a failed response, rolling back to send previous logs
+//
+// returns true on success, false on failure
+//
+func (rf *Raft) MakeAgreeUpToEntry(entry LogEntry) bool {
+	rf.Log(LogDebug, "Start sending append entries requests to peers")
+
+	// make server -> reply map
+	// and send initial requests (with just the single log entry)
+	replies := make(map[int]*AppendEntriesReply)
+	for idx := range rf.peers {
+		if idx != rf.me {
+			replies[idx] = &AppendEntriesReply{}
+			args := &AppendEntriesArgs{LogEntries: []LogEntry{entry}}
+			go rf.sendAppendEntries(idx, args, replies[idx])
+		}
+	}
+
 	for !rf.killed() {
 		rf.mu.Lock()
-		successes := 1 // since it's already on this server
-		failures := 0
-		for idx := range replies {
-			if replies[idx].Success {
-				successes++
-			} else if replies[idx].Returned {
-				failures++
+		replicated := 1 // as log is already on this server
+
+		for idx := range rf.peers {
+			if idx != rf.me {
+				if replies[idx].Success {
+					// success, increment next index and replicated
+					rf.nextIndex[idx]++
+					replicated++
+				} else if !replies[idx].Success && replies[idx].Returned {
+
+					// we might have found out we shouldn't be the leader!
+					if replies[idx].CurrentTerm > rf.currentTerm {
+						rf.Log(LogDebug, "Found out we shoudl not be the leader! Changing to follower")
+						rf.state = Follower
+						rf.mu.Unlock()
+						return false
+					}
+
+					// failure, roll back nextIndex and resend
+					rf.nextIndex[idx]--
+					rf.Log(LogDebug, "Failed to AppendEntries to server", idx, "for entry idx", entry.Index, " - rolling back to idx", rf.nextIndex[idx])
+					replies[idx] = &AppendEntriesReply{}
+					args := &AppendEntriesArgs{LogEntries: rf.log[rf.nextIndex[idx]:]}
+					go rf.sendAppendEntries(idx, args, replies[idx])
+				}
 			}
 		}
-		if successes >= int(math.Ceil(float64(len(rf.peers))/2.0)) {
-			// can increment commit, as replicated on majority
-			// also notify the applyCh
-			rf.Log(LogDebug, "Entry idx replicated on majority, new commit idx:", rf.commitIndex+1)
+
+		// update commit idx if need be
+		// also notify the applyCh
+		if replicated >= int(math.Ceil(float64(len(rf.peers))/2.0)) &&
+			rf.commitIndex < entry.Index {
+			rf.Log(LogDebug, "Entry idx", entry.Index, "replicated on majority, new commit idx:", rf.commitIndex+1)
 			rf.commitIndex++
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				CommandIndex: rf.commitIndex,
 				Command:      rf.log[rf.commitIndex-1].Command,
 			}
+		}
+
+		// we're done!
+		if replicated == len(rf.peers) {
+			rf.Log(LogDebug, "Entry idx", entry.Index, "replicated on all servers")
 			rf.mu.Unlock()
 			return true
-		} else if successes+failures == len(rf.peers) {
-			// all requests have returned, didn't have enough successes, return false
-			rf.Log(LogDebug, "AppendEntries didn't succeed enough to increment commit idx, still at:", rf.commitIndex)
-			rf.mu.Unlock()
-			return false
 		}
+
+		// release lock and sleep
 		rf.mu.Unlock()
 		time.Sleep(DefaultPollInterval)
 	}
+
 	return false
 }
 
