@@ -269,6 +269,16 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	rf.mu.Lock()
 	args.CandidateId = rf.me
 	args.CandidateTerm = rf.currentTerm
+
+	// grab last log index and term - default to -1 if log is []
+	if len(rf.log) > 0 {
+		args.LastLogIndex = len(rf.log)
+		args.LastLogTerm = rf.log[args.LastLogIndex-1].Term
+	} else {
+		args.LastLogIndex = -1
+		args.LastLogTerm = -1
+	}
+
 	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
