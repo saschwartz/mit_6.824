@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"regexp"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,8 +54,9 @@ type ApplyMsg struct {
 // LogEntry is a struct for info about a single log entry
 //
 type LogEntry struct {
-	Index int // log index
-	Term  int // the term of the leader when this log was stored
+	Index   int // log index
+	Term    int // the term of the leader when this log was stored
+	Command interface{}
 }
 
 // server state types and consts
@@ -90,13 +93,16 @@ type Raft struct {
 
 	// election timeout for follower
 	electionTimeout time.Duration
+
+	// for passing info about comitted messages to tester code
+	applyCh chan ApplyMsg
 }
 
 // HeartbeatSendInterval is How often do we send hearbeats
 const HeartbeatSendInterval = time.Duration(50) * time.Millisecond
 
-// ElectionTimeoutPollInterval is how often to poll for election timeout, and the election parameters
-const ElectionTimeoutPollInterval = time.Duration(50) * time.Millisecond
+// DefaultPollInterval is how often to poll for election timeout, and the election parameters
+const DefaultPollInterval = time.Duration(50) * time.Millisecond
 
 // MinElectionTimeout gives the lower bound on the randomly generated
 // election timeout window in ms
@@ -121,7 +127,7 @@ func (me LogLevel) String() string {
 }
 
 const (
-	SetLogLevel LogLevel = LogInfo
+	SetLogLevel LogLevel = LogDebug
 )
 
 // GetState returns currentTerm and whether this server
@@ -271,6 +277,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	CurrentTerm int  // the current term of the server that was hit (for leader to update if needed)
 	Success     bool // true if the follower had an entry matching prevlogindex and prevlogterm
+	Returned    bool // so we can check whether or not the function has returned (e.g. when gathering responses from a leader commit request)
 }
 
 //
@@ -279,6 +286,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	if args.LeaderTerm < rf.currentTerm {
 		// leader out of date
 		reply.Success = false
@@ -308,19 +316,40 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = append(rf.log, e)
 		}
 
-		// update commit index
+		// update commit index and send updates to applyCh
 		if args.LeaderCommitIndex > rf.commitIndex {
-			rf.commitIndex = Min(args.LeaderCommitIndex, args.LogEntries[len(args.LogEntries)-1].Index)
+
+			// walk up through messages to min of leader commit idx,
+			// and idx of last log entry added.
+			// for each message, send acknowledgement to applyCh and
+			// update this server's commit idx
+			idx := rf.commitIndex + 1
+			for idx <= args.LeaderCommitIndex &&
+				(len(args.LogEntries) == 0 || idx < args.LogEntries[len(args.LogEntries)-1].Index) {
+				// send acknowledgement to applyCh
+				rf.applyCh <- ApplyMsg{
+					CommandValid: true,
+					CommandIndex: idx,
+					Command:      rf.log[idx-1].Command,
+				}
+
+				// increment and update commit idx
+				rf.commitIndex = idx
+				idx++
+			}
 		}
 	}
 
-	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderId, "- term", args.LeaderTerm, "- outcome:", reply.Success)
+	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderId, "- term", args.LeaderTerm, "- logs to add:", len(args.LogEntries), "- outcome:", reply.Success)
 
 	// update currentTerm if request has higher term
 	if args.LeaderTerm > rf.currentTerm {
 		rf.currentTerm = args.LeaderTerm
 	}
 	reply.CurrentTerm = rf.currentTerm
+
+	// so caller knows we have finished
+	reply.Returned = true
 }
 
 // function to call the AppendEntries RPC
@@ -333,9 +362,13 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	args.LeaderCommitIndex = rf.commitIndex
 
 	// figure out prevLogIndex and prevLogTerm based on entries passed in
-	if len(args.LogEntries) > 0 && len(rf.log) > 0 {
+	// otherwise set defaults to -1
+	if len(args.LogEntries) > 0 && args.LogEntries[0].Index != 1 {
 		args.PrevLogIndex = args.LogEntries[0].Index - 1
 		args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
+	} else {
+		args.PrevLogIndex = -1
+		args.PrevLogTerm = -1
 	}
 
 	rf.mu.Unlock()
@@ -359,26 +392,83 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.Log(LogDebug, "Start called")
 
 	// server is not the leader, return false immediately
 	if rf.state != Leader {
+		rf.Log(LogDebug, "Start return false: not a leader")
 		return -1, -1, false
 	}
 
+	// the entry to add
+	entry := LogEntry{
+		Index:   rf.commitIndex + 1,
+		Term:    rf.currentTerm,
+		Command: command,
+	}
+
 	// send out appendEntries concurrently if leader
+	rf.Log(LogDebug, "Start sending append entries requests to peers")
+	replies := []*AppendEntriesReply{}
 	for idx := range rf.peers {
 		if idx != rf.me {
-			args := &AppendEntriesArgs{
-				LogEntries: []LogEntry{
-					LogEntry{Index: rf.commitIndex + 1, Term: rf.currentTerm},
-				},
-			}
+			args := &AppendEntriesArgs{LogEntries: []LogEntry{entry}}
 			reply := &AppendEntriesReply{}
+			replies = append(replies, reply)
 			go rf.sendAppendEntries(idx, args, reply)
 		}
 	}
 
+	// append to leader log and start routine for leader
+	// to check whether to update commit index
+	rf.log = append(rf.log, entry)
+	go rf.CommitIfEnoughReplies(replies, rf.commitIndex+1)
+
+	// expected index is 1 after the current index
 	return rf.commitIndex + 1, rf.currentTerm, true
+}
+
+// CommitIfEnoughReplies takes replies to a bunch of
+// AppendEntries RPCs, and updates the leader commit index
+// to idx if enough successful replies have come back
+// returns whether the commit succeeded
+func (rf *Raft) CommitIfEnoughReplies(replies []*AppendEntriesReply, idx int) bool {
+	for !rf.killed() {
+		rf.mu.Lock()
+		successes := 1 // since it's already on this server
+		failures := 0
+		for idx := range replies {
+			if replies[idx].Success {
+				successes++
+			} else if replies[idx].Returned {
+				failures++
+			}
+		}
+		if successes >= int(math.Ceil(float64(len(rf.peers))/2.0)) {
+			// can increment commit, as replicated on majority
+			// also notify the applyCh
+			rf.Log(LogDebug, "Entry idx replicated on majority, new commit idx:", rf.commitIndex+1)
+			rf.commitIndex++
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				CommandIndex: rf.commitIndex,
+				Command:      rf.log[rf.commitIndex-1].Command,
+			}
+			rf.mu.Unlock()
+			return true
+		} else if successes+failures == len(rf.peers) {
+			// all requests have returned, didn't have enough successes, return false
+			rf.Log(LogDebug, "AppendEntries didn't succeed enough to increment commit idx, still at:", rf.commitIndex)
+			rf.mu.Unlock()
+			return false
+		}
+		rf.mu.Unlock()
+		time.Sleep(DefaultPollInterval)
+	}
+	return false
 }
 
 // Kill kills a raft server
@@ -414,7 +504,7 @@ func GetRandomElectionTimeout() time.Duration {
 func (rf *Raft) HeartbeatTimeoutCheck() {
 	// get heartbeat check start time
 	lastHeartbeatCheck := time.Now()
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.electionTimeout > 0 && rf.state == Follower {
 			currentTime := time.Now()
@@ -430,14 +520,14 @@ func (rf *Raft) HeartbeatTimeoutCheck() {
 			return
 		}
 		rf.mu.Unlock()
-		time.Sleep(ElectionTimeoutPollInterval)
+		time.Sleep(DefaultPollInterval)
 	}
 }
 
 // SendHeartbeat lets a header send heartbeats regularly
 // returns early if state changes from leader
 func (rf *Raft) SendHeartbeat() {
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.state != Leader {
 			rf.mu.Unlock()
@@ -489,7 +579,7 @@ func (rf *Raft) RunElection() {
 
 	// while we still have time on the clock, poll
 	// for election result
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.state == Follower {
 			rf.Log(LogInfo, "now a follower")
@@ -526,7 +616,7 @@ func (rf *Raft) RunElection() {
 			return
 		}
 		rf.mu.Unlock()
-		time.Sleep(ElectionTimeoutPollInterval)
+		time.Sleep(DefaultPollInterval)
 	}
 }
 
@@ -565,6 +655,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// set election timeout randomly
 	rf.electionTimeout = GetRandomElectionTimeout()
+
+	// for passing info about commits
+	rf.applyCh = applyCh
+
 	rf.mu.Unlock()
 
 	// start election timeout check - server can't be a leader when created
@@ -580,7 +674,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 // in order to log only when an instance hasn't been killed
 func (rf *Raft) Log(level LogLevel, a ...interface{}) {
 	if !rf.killed() && level >= SetLogLevel {
-		data := append([]interface{}{level, "[ Server", rf.me, "- term", rf.currentTerm, "]"}, a...)
+		pc, _, ln, _ := runtime.Caller(1)
+		rp := regexp.MustCompile(".+\\.([a-zA-Z]+)")
+		funcName := rp.FindStringSubmatch(runtime.FuncForPC(pc).Name())[1]
+		data := append([]interface{}{"[ Server", rf.me, "- term", rf.currentTerm, "]", "[", funcName, ln, "]"}, a...)
 		fmt.Println(data...)
 	}
 }
