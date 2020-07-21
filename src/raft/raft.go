@@ -107,11 +107,11 @@ const DefaultPollInterval = time.Duration(50) * time.Millisecond
 
 // MinElectionTimeout gives the lower bound on the randomly generated
 // election timeout window in ms
-const MinElectionTimeout = 1000
+const MinElectionTimeout = 500
 
 // MaxElectionTimeout gives the upper bound on the randomly generated
 // election timeout window in ms
-const MaxElectionTimeout = 2500
+const MaxElectionTimeout = 1500
 
 // log level state types and consts
 type LogLevel int
@@ -128,7 +128,7 @@ func (me LogLevel) String() string {
 }
 
 const (
-	SetLogLevel LogLevel = LogInfo
+	SetLogLevel LogLevel = LogDebug
 )
 
 // GetState returns currentTerm and whether this server
@@ -200,7 +200,7 @@ func LogUpToDate(lastIndex int, lastTerm int, log []LogEntry) bool {
 		return true // any log is up to date with blank log
 	}
 	lastEntry := log[len(log)-1]
-	return lastTerm >= lastEntry.Term && lastIndex >= len(log)
+	return (lastTerm > lastEntry.Term) || (lastTerm == lastEntry.Term && lastIndex >= len(log))
 }
 
 //
@@ -227,9 +227,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.Log(LogDebug, "Received RequestVote from server", args.CandidateId, "term", args.CandidateTerm, "\n- args.LastLogIndex", args.LastLogIndex, "\n- args.lastLogTerm", args.LastLogTerm, "\n- rf.log", rf.log, "\n- rf.votedFor", rf.votedFor, "\n- VoteGranted:", reply.VoteGranted)
 
-	// update currentTerm if candidate has higher term
+	// update currentTerm and state if candidate has higher term
 	if args.CandidateTerm > rf.currentTerm {
 		rf.currentTerm = args.CandidateTerm
+		if rf.state == Leader {
+			rf.state = Follower
+			go rf.HeartbeatTimeoutCheck()
+		}
 	}
 	reply.CurrentTerm = rf.currentTerm
 
@@ -302,6 +306,7 @@ type AppendEntriesReply struct {
 	CurrentTerm int  // the current term of the server that was hit (for leader to update if needed)
 	Success     bool // true if the follower had an entry matching prevlogindex and prevlogterm
 	Returned    bool // so we can check whether or not the function has returned (e.g. when gathering responses from a leader commit request)
+	MatchIndex  int  // index of last log replicated on this server
 }
 
 //
@@ -318,6 +323,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		(len(rf.log) < args.PrevLogIndex || rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
 		// prev log is incorrect, need to roll back
 		reply.Success = false
+		// delete any entries that we know must be in conflict
+		// basically trim log to be up to and NOT including prev log index
+		if len(rf.log) >= args.PrevLogIndex {
+			rf.log = rf.log[:args.PrevLogIndex]
+		}
+		// reset election timeout
+		rf.electionTimeout = GetRandomElectionTimeout()
 	} else {
 		reply.Success = true
 		// reset election timeout
@@ -366,13 +378,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderId, "term", args.LeaderTerm, "\n - args.LogEntries:", args.LogEntries, "\n - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n - rf.log", rf.log, "\n - rf.commitIndex", rf.commitIndex, "\n - success:", reply.Success)
+	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderId, "term", args.LeaderTerm, "\n - args.LogEntries:", args.LogEntries, "\n - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n - rf.log", rf.log, "\n - rf.commitIndex", rf.commitIndex, "\n - args.PrevLogIndex", args.PrevLogIndex, "\n - args.PrevLogTerm", args.PrevLogTerm, "\n - success:", reply.Success)
 
 	// update currentTerm if request has higher term
 	if args.LeaderTerm > rf.currentTerm {
 		rf.currentTerm = args.LeaderTerm
 	}
 	reply.CurrentTerm = rf.currentTerm
+
+	// index of highest term replicated on this server - used for walking backwards,
+	// and confirming commits
+	reply.MatchIndex = len(rf.log)
 
 	// so caller knows we have finished
 	reply.Returned = true
@@ -388,9 +404,14 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	args.LeaderCommitIndex = rf.commitIndex
 
 	// figure out prevLogIndex and prevLogTerm based on entries passed in
+	// otherwise they are the commit index of the leader if we are sending no logs
+	//    (this is for the case where a heartbeat)
 	// otherwise set defaults to -1
 	if len(args.LogEntries) > 0 && args.LogEntries[0].Index != 1 {
 		args.PrevLogIndex = args.LogEntries[0].Index - 1
+		args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
+	} else if len(args.LogEntries) == 0 && rf.commitIndex > 0 {
+		args.PrevLogIndex = rf.commitIndex
 		args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
 	} else {
 		args.PrevLogIndex = -1
@@ -426,111 +447,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
-	// the entry to add
+	// heartbeat routine will pick this up and send appropriate requests
 	entry := LogEntry{
 		Index:   len(rf.log) + 1,
 		Term:    rf.currentTerm,
 		Command: command,
 	}
-
-	// start agree routine and return immediately
 	rf.log = append(rf.log, entry)
-	go rf.MakeAgreeUpToEntry(entry)
+
 	return entry.Index, entry.Term, true
-}
-
-// MakeAgreeUpToEntry takes an entry to add to the system,
-// and continually sends the AppendEntries requests necessary to eventually
-// make all rafts logs agree up to that entry (stronger than commit!)
-//
-// This means
-// - sending out the new entry to be added
-// - if we receive a failed response, rolling back to send previous logs
-//
-// returns true on success, false on failure
-//
-func (rf *Raft) MakeAgreeUpToEntry(entry LogEntry) bool {
-	rf.Log(LogDebug, "Starting agreement to log up to entry:", entry)
-
-	// make server -> reply map
-	replies := make(map[int]*AppendEntriesReply)
-
-	for !rf.killed() {
-		rf.mu.Lock()
-
-		// in case we stopped being leader, or we are trying to
-		// get agreement to a newer log
-		if rf.state != Leader {
-			rf.Log(LogDebug, "Detected we are no longer leader, stopping agreement.")
-			rf.mu.Unlock()
-			return false
-		} else if rf.log[(len(rf.log))-1].Index > entry.Index {
-			rf.Log(LogDebug, "Detected an agreement process running with a higher log, stopping agreement.")
-			rf.mu.Unlock()
-			return false
-		}
-
-		replicated := 1 // as log is already on this server
-
-		for idx := range rf.peers {
-			if idx != rf.me {
-				if _, ok := replies[idx]; !ok {
-					// not yet sent, send the message
-					replies[idx] = &AppendEntriesReply{}
-					args := &AppendEntriesArgs{LogEntries: []LogEntry{entry}}
-					go rf.sendAppendEntries(idx, args, replies[idx])
-				} else if replies[idx].Success {
-					// success, increment next index and replicated
-					rf.nextIndex[idx] = entry.Index + 1
-					replicated++
-				} else if !replies[idx].Success && replies[idx].Returned {
-
-					// we might have found out we shouldn't be the leader!
-					if replies[idx].CurrentTerm > rf.currentTerm {
-						rf.Log(LogDebug, "Detected server with higher term, stopping agreement and changing to follower.")
-						rf.state = Follower
-						rf.mu.Unlock()
-						return false
-					}
-
-					// failure, roll back nextIndex and resend
-					rf.nextIndex[idx]--
-					rf.Log(LogDebug, "Failed to AppendEntries to server", idx, "- rolling back to idx", rf.nextIndex[idx])
-					replies[idx] = &AppendEntriesReply{}
-					args := &AppendEntriesArgs{LogEntries: rf.log[rf.nextIndex[idx]:]}
-					go rf.sendAppendEntries(idx, args, replies[idx])
-				}
-			}
-		}
-
-		// update commit idx if need be
-		// also notify the applyCh message by message
-		if replicated >= int(math.Ceil(float64(len(rf.peers))/2.0)) &&
-			rf.commitIndex < entry.Index {
-			for rf.commitIndex < entry.Index {
-				rf.commitIndex++
-				rf.Log(LogInfo, "entry", entry, "replicated on majority, new commit idx:", rf.commitIndex)
-				rf.applyCh <- ApplyMsg{
-					CommandValid: true,
-					CommandIndex: rf.commitIndex,
-					Command:      rf.log[rf.commitIndex-1].Command,
-				}
-			}
-		}
-
-		// we're done!
-		if replicated == len(rf.peers) {
-			rf.Log(LogInfo, "entry", entry, "replicated on all servers")
-			rf.mu.Unlock()
-			return true
-		}
-
-		// release lock and sleep
-		rf.mu.Unlock()
-		time.Sleep(DefaultPollInterval)
-	}
-
-	return false
 }
 
 // Kill kills a raft server
@@ -578,7 +503,7 @@ func (rf *Raft) HeartbeatTimeoutCheck() {
 			// quit this function and run the election
 			rf.Log(LogInfo, "timed out as follower, running election.")
 			rf.mu.Unlock()
-			defer rf.RunElection()
+			go rf.RunElection()
 			return
 		}
 		rf.mu.Unlock()
@@ -586,21 +511,61 @@ func (rf *Raft) HeartbeatTimeoutCheck() {
 	}
 }
 
-// SendHeartbeat lets a header send heartbeats regularly
-// returns early if state changes from leader
-func (rf *Raft) SendHeartbeat() {
+// HeartbeatAppendEntries is the leader routine for sending out
+// AppendEntries requests to servers
+//
+// The contents of these are dictated by rf.nextIndex[] for each server
+//
+// The requests are send on a heartbeat interval
+func (rf *Raft) HeartbeatAppendEntries() {
+	// make server -> reply map
+	replies := make(map[int]*AppendEntriesReply)
+
 	for !rf.killed() {
 		rf.mu.Lock()
+
+		// if we are no longer the leader
 		if rf.state != Leader {
+			rf.Log(LogDebug, "Discovered no longer the leader, stopping heartbeat")
 			rf.mu.Unlock()
 			return
 		}
 		// send out heartbeats concurrently if leader
 		for idx := range rf.peers {
 			if idx != rf.me {
-				args := &AppendEntriesArgs{}
-				reply := &AppendEntriesReply{}
-				go rf.sendAppendEntries(idx, args, reply)
+
+				// successful request - update matchindex and nextindex accordingly
+				if replies[idx].Success {
+					if replies[idx].Success {
+						rf.matchIndex[idx] = replies[idx].MatchIndex
+						rf.nextIndex[idx] = replies[idx].MatchIndex + 1
+					}
+
+					// failed request - check for better term or decrease nextIndex
+				} else if !replies[idx].Success && replies[idx].Returned {
+
+					// we might have found out we shouldn't be the leader!
+					if replies[idx].CurrentTerm > rf.currentTerm {
+						rf.Log(LogDebug, "Detected server with higher term, stopping agreement and changing to follower.")
+						rf.state = Follower
+						go rf.HeartbeatTimeoutCheck()
+						rf.mu.Unlock()
+						return
+					}
+
+					// failure, decrement nextIndex, and resend
+					rf.Log(LogDebug, "Failed to AppendEntries to server", idx, "- rolling back to idx", rf.nextIndex[idx])
+					rf.nextIndex[idx]--
+				}
+
+				// send a new append entries request to the server
+				replies[idx] = &AppendEntriesReply{}
+				entries := []LogEntry{}
+				if rf.nextIndex[idx] <= len(rf.log) {
+					entries = rf.log[rf.nextIndex[idx]-1:]
+				}
+				args := &AppendEntriesArgs{LogEntries: entries}
+				go rf.sendAppendEntries(idx, args, replies[idx])
 			}
 		}
 		rf.mu.Unlock()
@@ -665,17 +630,17 @@ func (rf *Raft) RunElection() {
 			// majority vote achieved - set state as leader and
 			// start sending heartbeats
 			if votes >= int(math.Ceil(float64(len(rf.peers))/2.0)) {
-				rf.Log(LogInfo, "elected leader")
+				rf.Log(LogInfo, "elected leader", "\n - rf.log:", rf.log, "\n - rf.commitIndex", rf.commitIndex)
 				rf.state = Leader
 				rf.mu.Unlock()
-				defer rf.SendHeartbeat()
+				go rf.HeartbeatAppendEntries()
 				return
 			}
 		} else {
 			// no result - need to rerun election
 			rf.Log(LogInfo, "timed out as candidate")
 			rf.mu.Unlock()
-			defer rf.RunElection()
+			go rf.RunElection()
 			return
 		}
 		rf.mu.Unlock()
