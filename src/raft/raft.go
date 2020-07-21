@@ -416,7 +416,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 	// figure out prevLogIndex and prevLogTerm based on entries passed in
 	// otherwise they are the commit index of the leader if we are sending no logs
-	//    (this is for the case where a heartbeat)
+	//    (so leader still finds out we're behind)
 	// otherwise set defaults to -1
 	if len(args.LogEntries) > 0 && args.LogEntries[0].Index != 1 {
 		args.PrevLogIndex = args.LogEntries[0].Index - 1
