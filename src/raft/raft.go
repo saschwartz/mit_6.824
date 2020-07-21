@@ -211,26 +211,30 @@ func LogUpToDate(lastIndex int, lastTerm int, log []LogEntry) bool {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	// request out of date with current leader
+	// request out of date with current leader, don't grant vote
 	if args.CandidateTerm < rf.currentTerm {
 		reply.VoteGranted = false
-	} else if ((rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.state != Leader) ||
-		args.CandidateTerm > rf.currentTerm &&
-			LogUpToDate(args.LastLogIndex, args.LastLogTerm, rf.log) {
+
 		// grant vote, if candidate is at right term and we haven't voted
 		// for anyone else yet, and this server isn't the leader
 		// and also check candidate log is at least as up to date as us
+	} else if ((rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.state != Leader) ||
+		args.CandidateTerm > rf.currentTerm &&
+			LogUpToDate(args.LastLogIndex, args.LastLogTerm, rf.log) {
 		rf.votedFor = args.CandidateID
 		reply.VoteGranted = true
-	} else {
+
 		// deny vote, already voted for someone else in this term
+	} else {
 		reply.VoteGranted = false
 	}
 
 	rf.Log(LogDebug, "Received RequestVote from server", args.CandidateID, "term", args.CandidateTerm, "\n  - args.LastLogIndex", args.LastLogIndex, "\n  - args.lastLogTerm", args.LastLogTerm, "\n  - rf.log", rf.log, "\n  - rf.votedFor", rf.votedFor, "\n  - VoteGranted:", reply.VoteGranted)
 
 	// update currentTerm and state if candidate has higher term
+	// if we found out we're no longer a leader, restart the heartbeat timeout check
 	if args.CandidateTerm > rf.currentTerm {
 		rf.currentTerm = args.CandidateTerm
 		if rf.state == Leader {
@@ -239,8 +243,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 	reply.CurrentTerm = rf.currentTerm
-
-	rf.mu.Unlock()
 	return
 }
 
