@@ -62,6 +62,7 @@ type LogEntry struct {
 // server state types and consts
 type serverState int
 
+// Leader etc are server states
 const (
 	Leader serverState = iota
 	Follower
@@ -113,9 +114,10 @@ const MinElectionTimeout = 500
 // election timeout window in ms
 const MaxElectionTimeout = 1500
 
-// log level state types and consts
+// LogLevel state types and consts
 type LogLevel int
 
+// LogDebug etc are different levels we can log at
 const (
 	LogDebug LogLevel = iota
 	LogInfo
@@ -127,8 +129,9 @@ func (me LogLevel) String() string {
 	return [...]string{"Debug", "Info", "Warning", "Error"}[me]
 }
 
+// SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogInfo
+	SetLogLevel LogLevel = LogDebug
 )
 
 // GetState returns currentTerm and whether this server
@@ -180,7 +183,7 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	CandidateTerm int
-	CandidateId   int
+	CandidateID   int
 	LastLogIndex  int // index of candidate’s last log entry
 	LastLogTerm   int // term of candidate’s last log entry
 }
@@ -212,20 +215,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// request out of date with current leader
 	if args.CandidateTerm < rf.currentTerm {
 		reply.VoteGranted = false
-	} else if ((rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.state != Leader) ||
+	} else if ((rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.state != Leader) ||
 		args.CandidateTerm > rf.currentTerm &&
 			LogUpToDate(args.LastLogIndex, args.LastLogTerm, rf.log) {
 		// grant vote, if candidate is at right term and we haven't voted
 		// for anyone else yet, and this server isn't the leader
 		// and also check candidate log is at least as up to date as us
-		rf.votedFor = args.CandidateId
+		rf.votedFor = args.CandidateID
 		reply.VoteGranted = true
 	} else {
 		// deny vote, already voted for someone else in this term
 		reply.VoteGranted = false
 	}
 
-	rf.Log(LogDebug, "Received RequestVote from server", args.CandidateId, "term", args.CandidateTerm, "\n- args.LastLogIndex", args.LastLogIndex, "\n- args.lastLogTerm", args.LastLogTerm, "\n- rf.log", rf.log, "\n- rf.votedFor", rf.votedFor, "\n- VoteGranted:", reply.VoteGranted)
+	rf.Log(LogDebug, "Received RequestVote from server", args.CandidateID, "term", args.CandidateTerm, "\n  - args.LastLogIndex", args.LastLogIndex, "\n  - args.lastLogTerm", args.LastLogTerm, "\n  - rf.log", rf.log, "\n  - rf.votedFor", rf.votedFor, "\n  - VoteGranted:", reply.VoteGranted)
 
 	// update currentTerm and state if candidate has higher term
 	if args.CandidateTerm > rf.currentTerm {
@@ -272,7 +275,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	rf.mu.Lock()
-	args.CandidateId = rf.me
+	args.CandidateID = rf.me
 	args.CandidateTerm = rf.currentTerm
 
 	// grab last log index and term - default to -1 if log is []
@@ -293,7 +296,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 //
 type AppendEntriesArgs struct {
 	LeaderTerm        int        // the current leader's term according to request
-	LeaderId          int        // so follower can redirect clients
+	LeaderID          int        // so follower can redirect clients
 	PrevLogIndex      int        // index of log entry preceding the new ones
 	PrevLogTerm       int        // the term of the previous log entry
 	LogEntries        []LogEntry // empty for heartbeat, o/w log entries to store
@@ -316,10 +319,30 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	// if leader is out of date, do nothing and return
 	if args.LeaderTerm < rf.currentTerm {
-		// leader out of date
 		reply.Success = false
-	} else if args.PrevLogIndex >= 0 &&
+		reply.Returned = true
+		reply.CurrentTerm = rf.currentTerm
+		return
+	}
+
+	// if leader not out of date, we want to
+	// 1. reset election clock
+	// 2. convert to follower status as we might have been
+	// candidate or leader - start heartbeat check as well
+	// 3. update our local term (leader term must be >= local)
+	rf.electionTimeout = GetRandomElectionTimeout()
+	if rf.state != Follower {
+		rf.state = Follower
+		go rf.HeartbeatTimeoutCheck()
+	}
+	rf.currentTerm = args.LeaderTerm
+	reply.CurrentTerm = rf.currentTerm
+
+	// leader's nextIndex is out of whack.
+	// trim log back accordingly
+	if args.PrevLogIndex >= 0 &&
 		(len(rf.log) < args.PrevLogIndex || rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
 		// prev log is incorrect, need to roll back
 		reply.Success = false
@@ -328,19 +351,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if len(rf.log) >= args.PrevLogIndex {
 			rf.log = rf.log[:args.PrevLogIndex]
 		}
-		// reset election timeout
-		rf.electionTimeout = GetRandomElectionTimeout()
+
+		// we can successfully add log entries if any.
+		// update log according to rules, and also update local
+		// commit index and notify applyCh
 	} else {
 		reply.Success = true
-		// reset election timeout
-		rf.electionTimeout = GetRandomElectionTimeout()
-
-		// if not a follower, change state and also
-		// need to start checking for heartbeat again
-		if rf.state != Follower {
-			rf.state = Follower
-			go rf.HeartbeatTimeoutCheck()
-		}
 
 		// delete any conflicting log entries and append new ones
 		for _, e := range args.LogEntries {
@@ -378,13 +394,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderId, "term", args.LeaderTerm, "\n - args.LogEntries:", args.LogEntries, "\n - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n - rf.log", rf.log, "\n - rf.commitIndex", rf.commitIndex, "\n - args.PrevLogIndex", args.PrevLogIndex, "\n - args.PrevLogTerm", args.PrevLogTerm, "\n - success:", reply.Success)
-
-	// update currentTerm if request has higher term
-	if args.LeaderTerm > rf.currentTerm {
-		rf.currentTerm = args.LeaderTerm
-	}
-	reply.CurrentTerm = rf.currentTerm
+	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderID, "term", args.LeaderTerm, "\n  - args.LogEntries:", args.LogEntries, "\n  - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n  - rf.log", rf.log, "\n  - rf.commitIndex", rf.commitIndex, "\n  - args.PrevLogIndex", args.PrevLogIndex, "\n  - args.PrevLogTerm", args.PrevLogTerm, "\n  - success:", reply.Success)
 
 	// index of highest term replicated on this server - used for walking backwards,
 	// and confirming commits
@@ -392,6 +402,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// so caller knows we have finished
 	reply.Returned = true
+	return
 }
 
 // function to call the AppendEntries RPC
@@ -399,7 +410,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	rf.mu.Lock()
 
 	// these are always just grabbed from rf
-	args.LeaderId = rf.me
+	args.LeaderID = rf.me
 	args.LeaderTerm = rf.currentTerm
 	args.LeaderCommitIndex = rf.commitIndex
 
@@ -454,6 +465,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, entry)
+	rf.Log(LogDebug, "Start called, current log:", rf.log, "\n  - rf.matchIndex: ", rf.matchIndex)
 
 	return entry.Index, entry.Term, true
 }
@@ -549,8 +561,9 @@ func (rf *Raft) HeartbeatAppendEntries() {
 
 					// we might have found out we shouldn't be the leader!
 					if replies[idx].CurrentTerm > rf.currentTerm {
-						rf.Log(LogDebug, "Detected server with higher term, stopping agreement and changing to follower.")
+						rf.Log(LogDebug, "Detected server with higher term, stopping heartbeat and changing to follower.")
 						rf.state = Follower
+						rf.currentTerm = replies[idx].CurrentTerm
 						go rf.HeartbeatTimeoutCheck()
 						rf.mu.Unlock()
 						return
@@ -572,8 +585,30 @@ func (rf *Raft) HeartbeatAppendEntries() {
 			}
 		}
 
-		// todo - check matchIndex to determine commit updates
-		// then update commitIndex and pass messages to applyCh as appropriate
+		// walk up through possible new commit indices
+		// update commit index and send message to applyCh as necessary
+		newIdx := rf.commitIndex + 1
+		for newIdx <= len(rf.log) {
+			replicas := 1 // already replicated in our log
+			for idx := range rf.peers {
+				if idx != rf.me && rf.matchIndex[idx] >= newIdx {
+					replicas++
+				}
+			}
+			if replicas >= int(math.Ceil(float64(len(rf.peers))/2.0)) &&
+				rf.log[newIdx-1].Term == rf.currentTerm {
+				rf.commitIndex = newIdx
+				rf.Log(LogInfo, "Command", rf.log[rf.commitIndex-1], "replicated on a majority of servers. Committed to index", rf.commitIndex)
+				rf.applyCh <- ApplyMsg{
+					CommandValid: true,
+					CommandIndex: rf.commitIndex,
+					Command:      rf.log[rf.commitIndex-1].Command,
+				}
+				newIdx++
+			} else {
+				break
+			}
+		}
 
 		rf.mu.Unlock()
 		time.Sleep(HeartbeatSendInterval)
@@ -637,8 +672,15 @@ func (rf *Raft) RunElection() {
 			// majority vote achieved - set state as leader and
 			// start sending heartbeats
 			if votes >= int(math.Ceil(float64(len(rf.peers))/2.0)) {
-				rf.Log(LogInfo, "elected leader", "\n - rf.log:", rf.log, "\n - rf.commitIndex", rf.commitIndex)
+				rf.Log(LogInfo, "elected leader", "\n  - rf.log:", rf.log, "\n  - rf.commitIndex", rf.commitIndex)
 				rf.state = Leader
+				// this volatile state is reinitialized on election
+				for idx := range rf.peers {
+					if idx != rf.me {
+						rf.nextIndex[idx] = len(rf.log) + 1
+						rf.matchIndex[idx] = 0
+					}
+				}
 				rf.mu.Unlock()
 				go rf.HeartbeatAppendEntries()
 				return
