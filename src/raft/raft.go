@@ -128,7 +128,7 @@ func (me LogLevel) String() string {
 }
 
 const (
-	SetLogLevel LogLevel = LogDebug
+	SetLogLevel LogLevel = LogInfo
 )
 
 // GetState returns currentTerm and whether this server
@@ -197,7 +197,7 @@ type RequestVoteReply struct {
 // else false
 func LogUpToDate(lastIndex int, lastTerm int, log []LogEntry) bool {
 	if len(log) == 0 {
-		return false
+		return true // any log is up to date with blank log
 	}
 	lastEntry := log[len(log)-1]
 	return lastTerm >= lastEntry.Term && lastIndex >= len(log)
@@ -208,14 +208,12 @@ func LogUpToDate(lastIndex int, lastTerm int, log []LogEntry) bool {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	// request out of date with current leader
 	if args.CandidateTerm < rf.currentTerm {
 		reply.VoteGranted = false
-	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) ||
+	} else if ((rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.state != Leader) ||
 		args.CandidateTerm > rf.currentTerm &&
-			rf.state != Leader &&
 			LogUpToDate(args.LastLogIndex, args.LastLogTerm, rf.log) {
 		// grant vote, if candidate is at right term and we haven't voted
 		// for anyone else yet, and this server isn't the leader
@@ -234,6 +232,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.CandidateTerm
 	}
 	reply.CurrentTerm = rf.currentTerm
+
+	rf.mu.Unlock()
 	return
 }
 
@@ -450,34 +450,44 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // returns true on success, false on failure
 //
 func (rf *Raft) MakeAgreeUpToEntry(entry LogEntry) bool {
-	rf.Log(LogDebug, "Starting agreement to log:", rf.log)
+	rf.Log(LogDebug, "Starting agreement to log up to entry:", entry)
 
 	// make server -> reply map
-	// and send initial requests (with just the single log entry)
 	replies := make(map[int]*AppendEntriesReply)
-	for idx := range rf.peers {
-		if idx != rf.me {
-			replies[idx] = &AppendEntriesReply{}
-			args := &AppendEntriesArgs{LogEntries: []LogEntry{entry}}
-			go rf.sendAppendEntries(idx, args, replies[idx])
-		}
-	}
 
 	for !rf.killed() {
 		rf.mu.Lock()
+
+		// in case we stopped being leader, or we are trying to
+		// get agreement to a newer log
+		if rf.state != Leader {
+			rf.Log(LogDebug, "Detected we are no longer leader, stopping agreement.")
+			rf.mu.Unlock()
+			return false
+		} else if rf.log[(len(rf.log))-1].Index > entry.Index {
+			rf.Log(LogDebug, "Detected an agreement process running with a higher log, stopping agreement.")
+			rf.mu.Unlock()
+			return false
+		}
+
 		replicated := 1 // as log is already on this server
 
 		for idx := range rf.peers {
 			if idx != rf.me {
-				if replies[idx].Success {
+				if _, ok := replies[idx]; !ok {
+					// not yet sent, send the message
+					replies[idx] = &AppendEntriesReply{}
+					args := &AppendEntriesArgs{LogEntries: []LogEntry{entry}}
+					go rf.sendAppendEntries(idx, args, replies[idx])
+				} else if replies[idx].Success {
 					// success, increment next index and replicated
-					rf.nextIndex[idx]++
+					rf.nextIndex[idx] = entry.Index + 1
 					replicated++
 				} else if !replies[idx].Success && replies[idx].Returned {
 
 					// we might have found out we shouldn't be the leader!
 					if replies[idx].CurrentTerm > rf.currentTerm {
-						rf.Log(LogDebug, "Found out we should not be the leader! Changing to follower")
+						rf.Log(LogDebug, "Detected server with higher term, stopping agreement and changing to follower.")
 						rf.state = Follower
 						rf.mu.Unlock()
 						return false
