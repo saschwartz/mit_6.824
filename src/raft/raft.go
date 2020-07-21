@@ -112,7 +112,7 @@ const MinElectionTimeout = 500
 
 // MaxElectionTimeout gives the upper bound on the randomly generated
 // election timeout window in ms
-const MaxElectionTimeout = 1500
+const MaxElectionTimeout = 2500
 
 // LogLevel state types and consts
 type LogLevel int
@@ -131,7 +131,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogDebug
+	SetLogLevel LogLevel = LogInfo
 )
 
 // GetState returns currentTerm and whether this server
@@ -394,14 +394,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderID, "term", args.LeaderTerm, "\n  - args.LogEntries:", args.LogEntries, "\n  - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n  - rf.log", rf.log, "\n  - rf.commitIndex", rf.commitIndex, "\n  - args.PrevLogIndex", args.PrevLogIndex, "\n  - args.PrevLogTerm", args.PrevLogTerm, "\n  - success:", reply.Success)
-
 	// index of highest term replicated on this server - used for walking backwards,
 	// and confirming commits
 	reply.MatchIndex = len(rf.log)
+	reply.Returned = true // so the caller knows we have finished
 
-	// so caller knows we have finished
-	reply.Returned = true
+	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderID, "term", args.LeaderTerm, "\n  - args.LogEntries:", args.LogEntries, "\n  - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n  - rf.log", rf.log, "\n  - rf.commitIndex", rf.commitIndex, "\n  - args.PrevLogIndex", args.PrevLogIndex, "\n  - args.PrevLogTerm", args.PrevLogTerm, "\n  - reply.MatchIndex", reply.MatchIndex, "\n  - success:", reply.Success)
 	return
 }
 
@@ -570,7 +568,7 @@ func (rf *Raft) HeartbeatAppendEntries() {
 					}
 
 					// failure, decrement nextIndex, and resend
-					rf.Log(LogDebug, "Failed to AppendEntries to server", idx, "- rolling back to idx", rf.nextIndex[idx])
+					rf.Log(LogDebug, "Failed to AppendEntries to server", idx, "- rolling back to idx", rf.nextIndex[idx]-1)
 					rf.nextIndex[idx]--
 				}
 
@@ -586,7 +584,8 @@ func (rf *Raft) HeartbeatAppendEntries() {
 		}
 
 		// walk up through possible new commit indices
-		// update commit index and send message to applyCh as necessary
+		// update commit index
+		origIndex := rf.commitIndex
 		newIdx := rf.commitIndex + 1
 		for newIdx <= len(rf.log) {
 			replicas := 1 // already replicated in our log
@@ -599,14 +598,18 @@ func (rf *Raft) HeartbeatAppendEntries() {
 				rf.log[newIdx-1].Term == rf.currentTerm {
 				rf.commitIndex = newIdx
 				rf.Log(LogInfo, "Command", rf.log[rf.commitIndex-1], "replicated on a majority of servers. Committed to index", rf.commitIndex)
-				rf.applyCh <- ApplyMsg{
-					CommandValid: true,
-					CommandIndex: rf.commitIndex,
-					Command:      rf.log[rf.commitIndex-1].Command,
-				}
-				newIdx++
-			} else {
-				break
+			}
+			newIdx++
+		}
+
+		// send messages to applyCh for every message that was committed
+		for origIndex < rf.commitIndex {
+			origIndex++
+			rf.Log(LogDebug, "Sending applyCh confirmation for commit of ", rf.log[origIndex-1], "at index", origIndex)
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				CommandIndex: origIndex,
+				Command:      rf.log[origIndex-1].Command,
 			}
 		}
 
