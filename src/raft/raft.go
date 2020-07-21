@@ -128,7 +128,7 @@ func (me LogLevel) String() string {
 }
 
 const (
-	SetLogLevel LogLevel = LogDebug
+	SetLogLevel LogLevel = LogInfo
 )
 
 // GetState returns currentTerm and whether this server
@@ -520,6 +520,9 @@ func (rf *Raft) HeartbeatTimeoutCheck() {
 func (rf *Raft) HeartbeatAppendEntries() {
 	// make server -> reply map
 	replies := make(map[int]*AppendEntriesReply)
+	for idx := range rf.peers {
+		replies[idx] = &AppendEntriesReply{}
+	}
 
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -568,6 +571,10 @@ func (rf *Raft) HeartbeatAppendEntries() {
 				go rf.sendAppendEntries(idx, args, replies[idx])
 			}
 		}
+
+		// todo - check matchIndex to determine commit updates
+		// then update commitIndex and pass messages to applyCh as appropriate
+
 		rf.mu.Unlock()
 		time.Sleep(HeartbeatSendInterval)
 	}
