@@ -131,7 +131,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogInfo
+	SetLogLevel LogLevel = LogDebug
 )
 
 // GetState returns currentTerm and whether this server
@@ -311,7 +311,12 @@ type AppendEntriesReply struct {
 	CurrentTerm int  // the current term of the server that was hit (for leader to update if needed)
 	Success     bool // true if the follower had an entry matching prevlogindex and prevlogterm
 	Returned    bool // so we can check whether or not the function has returned (e.g. when gathering responses from a leader commit request)
-	MatchIndex  int  // index of last log replicated on this server
+
+	// these are all to assist with commit and rollback
+	LogLength                 int
+	ConflictingEntryTerm      int // the term of an entry that conflicts
+	IndexFirstConflictingTerm int // the index of the first entry that has term ConflictingEntryTerm
+
 }
 
 //
@@ -348,15 +353,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		(len(rf.log) < args.PrevLogIndex || rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
 		// prev log is incorrect, need to roll back
 		reply.Success = false
-		// delete any entries that we know must be in conflict
-		// basically trim log to be up to and NOT including prev log index
-		if len(rf.log) >= args.PrevLogIndex {
-			rf.log = rf.log[:args.PrevLogIndex]
+
+		// need to store these so that we can do fast rollback
+		reply.ConflictingEntryTerm = -1
+		reply.IndexFirstConflictingTerm = -1
+		if args.PrevLogIndex <= len(rf.log) {
+			reply.ConflictingEntryTerm = rf.log[args.PrevLogIndex-1].Term
+			reply.IndexFirstConflictingTerm = args.PrevLogIndex
+			for reply.IndexFirstConflictingTerm-2 > 0 &&
+				rf.log[reply.IndexFirstConflictingTerm-2].Term == rf.log[reply.IndexFirstConflictingTerm-1].Term {
+				reply.IndexFirstConflictingTerm--
+			}
 		}
 
-		// we can successfully add log entries if any.
-		// update log according to rules, and also update local
-		// commit index and notify applyCh
 	} else {
 		reply.Success = true
 
@@ -396,12 +405,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	// index of highest term replicated on this server - used for walking backwards,
+	// length of the log stored on this server - used for walking backwards,
 	// and confirming commits
-	reply.MatchIndex = len(rf.log)
-	reply.Returned = true // so the caller knows we have finished
+	reply.LogLength = len(rf.log)
 
-	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderID, "term", args.LeaderTerm, "\n  - args.LogEntries:", args.LogEntries, "\n  - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n  - rf.log", rf.log, "\n  - rf.commitIndex", rf.commitIndex, "\n  - args.PrevLogIndex", args.PrevLogIndex, "\n  - args.PrevLogTerm", args.PrevLogTerm, "\n  - reply.MatchIndex", reply.MatchIndex, "\n  - success:", reply.Success)
+	// so the caller knows we have finished
+	reply.Returned = true
+
+	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderID, "term", args.LeaderTerm, "\n  - args.LogEntries:", args.LogEntries, "\n  - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n  - rf.log", rf.log, "\n  - rf.commitIndex", rf.commitIndex, "\n  - args.PrevLogIndex", args.PrevLogIndex, "\n  - args.PrevLogTerm", args.PrevLogTerm, "\n  - reply.LogLength", reply.LogLength, "\n  - reply.ConflictingEntryTerm", reply.ConflictingEntryTerm, "\n  - reply.IndexFirstConflictingTerm", reply.IndexFirstConflictingTerm, "\n  - success:", reply.Success)
 	return
 }
 
@@ -552,8 +563,8 @@ func (rf *Raft) HeartbeatAppendEntries() {
 				// successful request - update matchindex and nextindex accordingly
 				if replies[idx].Success {
 					if replies[idx].Success {
-						rf.matchIndex[idx] = replies[idx].MatchIndex
-						rf.nextIndex[idx] = replies[idx].MatchIndex + 1
+						rf.matchIndex[idx] = replies[idx].LogLength
+						rf.nextIndex[idx] = replies[idx].LogLength + 1
 					}
 
 					// failed request - check for better term or decrease nextIndex
@@ -569,9 +580,25 @@ func (rf *Raft) HeartbeatAppendEntries() {
 						return
 					}
 
-					// failure, decrement nextIndex, and resend
-					rf.Log(LogDebug, "Failed to AppendEntries to server", idx, "- rolling back to idx", rf.nextIndex[idx]-1)
-					rf.nextIndex[idx]--
+					// failure - we need to decrease next index
+					// 1. case where follower has no entry at the place we thought
+					//    => want to back up to start of follower log
+					// 2. case where server has entry with different term NOT seen by leader
+					//    => want to back up nextIndex to the start of the 'run' of entries with that term (i.e. IndexFirstConflictingTerm)
+					// 3. case where server has entry with different term that HAS been seen by leader
+					//    => want to back up to last entry leader has with that term
+					if replies[idx].ConflictingEntryTerm == -1 {
+						rf.nextIndex[idx] = replies[idx].LogLength + 1
+					} else if rf.log[replies[idx].IndexFirstConflictingTerm-1].Term != replies[idx].ConflictingEntryTerm {
+						rf.nextIndex[idx] = replies[idx].IndexFirstConflictingTerm
+					} else {
+						rf.nextIndex[idx] = replies[idx].IndexFirstConflictingTerm
+						for rf.log[rf.nextIndex[idx]].Term == replies[idx].ConflictingEntryTerm {
+							rf.nextIndex[idx]++
+						}
+						rf.nextIndex[idx]++ // want to go one after the last entry leader has with this term
+					}
+					rf.Log(LogDebug, "Failed to AppendEntries to server", idx, "- rolling back to idx", rf.nextIndex[idx])
 				}
 
 				// send a new append entries request to the server
