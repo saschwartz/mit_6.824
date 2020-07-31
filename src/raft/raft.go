@@ -133,7 +133,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogDebug
+	SetLogLevel LogLevel = LogWarning
 )
 
 // GetState returns currentTerm and whether this server
@@ -382,15 +382,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// delete any conflicting log entries and append new ones
 		for _, e := range args.LogEntries {
-			// need to remove all entries from this point onwards inclusive
+			// need to remove all entries from this point onwards inclusive if there's a term clash
 			if e.Index <= len(rf.log) && rf.log[e.Index-1].Term != e.Term {
 				rf.log = rf.log[:e.Index-1]
 			}
 
-			// append current entry if it is going to be at the end of the log
-			// if it won't be at the end of the log, it must already be there
+			// append current entry if it is going to be at the end of the log, otherwise just overwrite
 			if e.Index > len(rf.log) {
 				rf.log = append(rf.log, e)
+			} else {
+				rf.log[e.Index-1] = e
 			}
 		}
 
