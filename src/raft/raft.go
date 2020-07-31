@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"math/rand"
@@ -27,6 +28,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"../labgob"
 	"../labrpc"
 )
 
@@ -131,7 +133,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogInfo
+	SetLogLevel LogLevel = LogDebug
 )
 
 // GetState returns currentTerm and whether this server
@@ -147,36 +149,41 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	// we don't bother locking, because we only call
+	// rf.persist from functions where we already hold the lock
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		// we have an error...
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // RequestVoteArgs is the args structure for RequestVote RPC
@@ -243,6 +250,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 	reply.CurrentTerm = rf.currentTerm
+
+	// persist - we may have changed rf.currentTerm or rf.votedFor
+	rf.persist()
 	return
 }
 
@@ -412,6 +422,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// so the caller knows we have finished
 	reply.Returned = true
 
+	// persist - we may have changed rf.currentTerm or rf.log
+	rf.persist()
+
 	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderID, "term", args.LeaderTerm, "\n  - args.LogEntries:", args.LogEntries, "\n  - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n  - rf.log", rf.log, "\n  - rf.commitIndex", rf.commitIndex, "\n  - args.PrevLogIndex", args.PrevLogIndex, "\n  - args.PrevLogTerm", args.PrevLogTerm, "\n  - reply.LogLength", reply.LogLength, "\n  - reply.ConflictingEntryTerm", reply.ConflictingEntryTerm, "\n  - reply.IndexFirstConflictingTerm", reply.IndexFirstConflictingTerm, "\n  - success:", reply.Success)
 	return
 }
@@ -477,6 +490,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.log = append(rf.log, entry)
 	rf.Log(LogDebug, "Start called, current log:", rf.log, "\n  - rf.matchIndex: ", rf.matchIndex)
+
+	// persist - we may have changed rf.log
+	rf.persist()
 
 	return entry.Index, entry.Term, true
 }
@@ -575,6 +591,10 @@ func (rf *Raft) HeartbeatAppendEntries() {
 						rf.Log(LogDebug, "Detected server with higher term, stopping heartbeat and changing to follower.")
 						rf.state = Follower
 						rf.currentTerm = replies[idx].CurrentTerm
+
+						// persist - updated current term
+						rf.persist()
+
 						go rf.HeartbeatTimeoutCheck()
 						rf.mu.Unlock()
 						return
@@ -655,6 +675,8 @@ func (rf *Raft) RunElection() {
 
 	rf.mu.Lock()
 	rf.currentTerm++
+	// persist - updated current term
+	rf.persist()
 	rf.Log(LogInfo, "running as candidate")
 
 	// set as candidate state and vote for ourselves,
@@ -770,11 +792,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.mu.Unlock()
 
-	// start election timeout check - server can't be a leader when created
-	go rf.HeartbeatTimeoutCheck()
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	// start election timeout check - server can't be a leader when created
+	go rf.HeartbeatTimeoutCheck()
 
 	return rf
 }
