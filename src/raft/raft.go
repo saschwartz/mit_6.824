@@ -178,11 +178,12 @@ func (rf *Raft) readPersist(data []byte) {
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&log) != nil {
-		// we have an error...
+		rf.Log(LogError, "Error reading persistent state.")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.Log(LogDebug, "Reading persistent state on restart:", "\nrf.currentTerm:", rf.currentTerm, "\nrf.votedFor:", rf.votedFor, "\nrf.log", rf.log)
 	}
 }
 
@@ -385,8 +386,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if e.Index <= len(rf.log) && rf.log[e.Index-1].Term != e.Term {
 				rf.log = rf.log[:e.Index-1]
 			}
-			// append current entry
-			rf.log = append(rf.log, e)
+
+			// append current entry if it is going to be at the end of the log
+			// if it won't be at the end of the log, it must already be there
+			if e.Index > len(rf.log) {
+				rf.log = append(rf.log, e)
+			}
 		}
 
 		// update commit index and send updates to applyCh
