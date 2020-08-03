@@ -128,7 +128,7 @@ const (
 )
 
 func (me LogLevel) String() string {
-	return [...]string{"Debug", "Info", "Warning", "Error"}[me]
+	return [...]string{"DEBUG", "INFO", "WARNING", "ERROR"}[me]
 }
 
 // SetLogLevel sets the level we log at
@@ -328,6 +328,8 @@ type AppendEntriesReply struct {
 	ConflictingEntryTerm      int // the term of an entry that conflicts
 	IndexFirstConflictingTerm int // the index of the first entry that has term ConflictingEntryTerm
 
+	// so that leader can appropriately update MatchIndex
+	NewLogsAdded int
 }
 
 //
@@ -413,12 +415,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					CommandIndex: idx,
 					Command:      rf.log[idx-1].Command,
 				}
+				rf.Log(LogDebug, "Sending applyCh confirmation for commit of ", rf.log[idx-1], "at index", idx)
 
 				// increment and update commit idx
 				rf.commitIndex = idx
 				idx++
 			}
 		}
+
+		// set new matchIndex
+		reply.NewLogsAdded = len(args.LogEntries)
 	}
 
 	// length of the log stored on this server - used for walking backwards,
@@ -585,8 +591,8 @@ func (rf *Raft) HeartbeatAppendEntries() {
 				// successful request - update matchindex and nextindex accordingly
 				if replies[idx].Success {
 					if replies[idx].Success {
-						rf.matchIndex[idx] = replies[idx].LogLength
-						rf.nextIndex[idx] = replies[idx].LogLength + 1
+						rf.matchIndex[idx] += replies[idx].NewLogsAdded
+						rf.nextIndex[idx] = rf.matchIndex[idx] + 1
 					}
 
 					// failed request - check for better term or decrease nextIndex
@@ -814,7 +820,7 @@ func (rf *Raft) Log(level LogLevel, a ...interface{}) {
 		pc, _, ln, _ := runtime.Caller(1)
 		rp := regexp.MustCompile(".+\\.([a-zA-Z]+)")
 		funcName := rp.FindStringSubmatch(runtime.FuncForPC(pc).Name())[1]
-		data := append([]interface{}{"[ Server", rf.me, "- term", rf.currentTerm, "]", "[", funcName, ln, "]"}, a...)
+		data := append([]interface{}{level, "[ Server", rf.me, "- term", rf.currentTerm, "]", "[", funcName, ln, "]"}, a...)
 		fmt.Println(data...)
 	}
 }
