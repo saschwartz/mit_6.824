@@ -442,7 +442,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 // function to call the AppendEntries RPC
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	rf.mu.Lock()
 
 	// these are always just grabbed from rf
 	args.LeaderID = rf.me
@@ -464,7 +463,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		args.PrevLogTerm = -1
 	}
 
-	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
