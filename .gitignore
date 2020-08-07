@@ -4,3 +4,6 @@ api.key
 
 # map reduce
 mr-*-*
+
+# log
+log.txt

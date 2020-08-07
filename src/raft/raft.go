@@ -133,7 +133,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogWarning
+	SetLogLevel LogLevel = LogDebug
 )
 
 // GetState returns currentTerm and whether this server
@@ -228,9 +228,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// grant vote, if candidate is at right term and we haven't voted
 		// for anyone else yet, and this server isn't the leader
 		// and also check candidate log is at least as up to date as us
-	} else if ((rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.state != Leader) ||
-		args.CandidateTerm > rf.currentTerm &&
-			LogUpToDate(args.LastLogIndex, args.LastLogTerm, rf.log) {
+	} else if (((rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.state != Leader) || args.CandidateTerm > rf.currentTerm) &&
+		LogUpToDate(args.LastLogIndex, args.LastLogTerm, rf.log) {
 		rf.votedFor = args.CandidateID
 		reply.VoteGranted = true
 
