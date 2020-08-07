@@ -637,7 +637,7 @@ func (rf *Raft) HeartbeatAppendEntries() {
 					entries = rf.log[rf.nextIndex[idx]-1:]
 				}
 				args := &AppendEntriesArgs{LogEntries: entries}
-				go rf.sendAppendEntries(idx, args, replies[idx])
+				rf.sendAppendEntries(idx, args, replies[idx])
 			}
 		}
 
