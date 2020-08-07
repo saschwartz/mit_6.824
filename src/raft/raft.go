@@ -286,20 +286,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	rf.mu.Lock()
 	args.CandidateID = rf.me
-	args.CandidateTerm = rf.currentTerm
-
-	// grab last log index and term - default to -1 if log is []
-	if len(rf.log) > 0 {
-		args.LastLogIndex = len(rf.log)
-		args.LastLogTerm = rf.log[args.LastLogIndex-1].Term
-	} else {
-		args.LastLogIndex = -1
-		args.LastLogTerm = -1
-	}
-
-	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -442,11 +429,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 // function to call the AppendEntries RPC
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-
-	// these are always just grabbed from rf
 	args.LeaderID = rf.me
-	args.LeaderTerm = rf.currentTerm
-	args.LeaderCommitIndex = rf.commitIndex
 
 	// figure out prevLogIndex and prevLogTerm based on entries passed in
 	// otherwise they are the commit index of the leader if we are sending no logs
@@ -636,8 +619,12 @@ func (rf *Raft) HeartbeatAppendEntries() {
 				if rf.nextIndex[idx] <= len(rf.log) {
 					entries = rf.log[rf.nextIndex[idx]-1:]
 				}
-				args := &AppendEntriesArgs{LogEntries: entries}
-				rf.sendAppendEntries(idx, args, replies[idx])
+				args := &AppendEntriesArgs{
+					LeaderTerm:        rf.currentTerm,
+					LeaderCommitIndex: rf.commitIndex,
+					LogEntries:        entries,
+				}
+				go rf.sendAppendEntries(idx, args, replies[idx])
 			}
 		}
 
@@ -697,18 +684,29 @@ func (rf *Raft) RunElection() {
 	// for holding replies - we send out the requests concurrently
 	peers := rf.peers
 	replies := make([]*RequestVoteReply, len(peers))
-	rf.mu.Unlock()
 
 	// send out requests concurrently
 	for idx := range rf.peers {
 		if idx != rf.me {
-			args := &RequestVoteArgs{}
+			args := &RequestVoteArgs{
+				CandidateTerm: rf.currentTerm,
+			}
 			reply := &RequestVoteReply{}
 			replies[idx] = reply
 			rf.Log(LogDebug, "Sending RequestVote to server", idx)
+
+			// grab last log index and term - default to -1 if log is []
+			if len(rf.log) > 0 {
+				args.LastLogIndex = len(rf.log)
+				args.LastLogTerm = rf.log[args.LastLogIndex-1].Term
+			} else {
+				args.LastLogIndex = -1
+				args.LastLogTerm = -1
+			}
 			go rf.sendRequestVote(idx, args, reply)
 		}
 	}
+	rf.mu.Unlock()
 
 	// while we still have time on the clock, poll
 	// for election result
