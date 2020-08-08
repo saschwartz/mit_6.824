@@ -10,12 +10,11 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Key          string
+	Value        string
+	Op           string // "Put" or "Append"
+	ClientSerial int
+	ClientID     string
 }
 
 type PutAppendReply struct {
@@ -23,11 +22,32 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
+	Key          string
+	ClientSerial int
+	ClientID     string
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
 }
+
+// LogLevel state types and consts
+type LogLevel int
+
+// LogDebug etc are different levels we can log at
+const (
+	LogDebug LogLevel = iota
+	LogInfo
+	LogWarning
+	LogError
+)
+
+func (me LogLevel) String() string {
+	return [...]string{"DEBUG", "INFO", "WARNING", "ERROR"}[me]
+}
+
+// SetLogLevel sets the level we log at
+const (
+	SetLogLevel LogLevel = LogInfo
+)

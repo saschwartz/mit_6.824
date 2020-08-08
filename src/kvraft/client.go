@@ -1,25 +1,30 @@
 package kvraft
 
 import (
-	"crypto/rand"
-	"math/big"
+	"fmt"
+	"math/rand"
+	"regexp"
+	"runtime"
 	"sync"
 
 	"../labrpc"
 )
 
 type Clerk struct {
-	servers   []*labrpc.ClientEnd
-	leaderIdx int
-	mu        sync.Mutex
-	// You will have to modify this struct.
+	servers      []*labrpc.ClientEnd
+	leaderIdx    int
+	mu           sync.Mutex
+	clientSerial int
+	clientID     string
 }
 
-func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
-	return x
+func randString(length int) string {
+	alpha := "abcdefghijklmnopqrztuvwxyz"
+	r := make([]byte, length)
+	for i := range r {
+		r[i] = alpha[rand.Intn(len(alpha))]
+	}
+	return string(r)
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
@@ -28,6 +33,14 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 
 	// just pick 0 as the initial leader
 	ck.leaderIdx = 0
+
+	// first request has client serial 0, then we inc
+	ck.clientSerial = 0
+
+	// need a unique client id
+	ck.clientID = randString(5)
+
+	ck.Log(LogInfo, "Client started.")
 
 	return ck
 }
@@ -45,9 +58,15 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	ck.Log(LogDebug, "Client sending op Get", key)
 
-	// You will have to modify this function.
-	args := GetArgs{Key: key}
+	// lock around incrementing serial so no funny business
+	// for concurrent client requests
+	ck.mu.Lock()
+	ck.clientSerial++
+	args := GetArgs{Key: key, ClientID: ck.clientID, ClientSerial: ck.clientSerial}
+	ck.mu.Unlock()
+
 	reply := GetReply{}
 
 	// keep trying operation until succeeds
@@ -77,7 +96,15 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{Key: key, Value: value, Op: op}
+	ck.Log(LogDebug, "Client sending op", op, key, value)
+
+	// lock around incrementing serial so no funny business
+	// for concurrent client requests
+	ck.mu.Lock()
+	ck.clientSerial++
+	args := PutAppendArgs{Key: key, Value: value, Op: op, ClientID: ck.clientID, ClientSerial: ck.clientSerial}
+	ck.mu.Unlock()
+
 	reply := PutAppendReply{}
 
 	// keep trying operation until succeeds
@@ -100,4 +127,16 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+// Log wraps fmt.Printf
+// in order to log only when an instance hasn't been killed
+func (ck *Clerk) Log(level LogLevel, a ...interface{}) {
+	if level >= SetLogLevel {
+		pc, _, ln, _ := runtime.Caller(1)
+		rp := regexp.MustCompile(".+\\.([a-zA-Z]+)")
+		funcName := rp.FindStringSubmatch(runtime.FuncForPC(pc).Name())[1]
+		data := append([]interface{}{level, "[ Clerk ", ck.clientID, "]", "[", funcName, ln, "]"}, a...)
+		fmt.Println(data...)
+	}
 }
