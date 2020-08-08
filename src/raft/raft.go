@@ -744,6 +744,11 @@ func (rf *Raft) RunElection() {
 						rf.matchIndex[idx] = 0
 					}
 				}
+
+				// append a 'no-op' as per section 8 of raft paper
+				// so that leader will figure out what entries are committed
+				rf.log = append(rf.log, LogEntry{Index: len(rf.log) + 1, Term: rf.currentTerm, Command: "noop"})
+
 				rf.mu.Unlock()
 				go rf.HeartbeatAppendEntries()
 				return
