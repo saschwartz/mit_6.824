@@ -726,7 +726,9 @@ func (rf *Raft) RunElection() {
 			lastElectionCheck = currentTime
 			votes := 1 //  we vote for ourselves automatically
 			for idx := range rf.peers {
-				if idx != rf.me && replies[idx].VoteGranted {
+				// need a successful vote AND need that our term hasn't increased (e.g. if
+				// since the last loop, we voted for a server with a higher term)
+				if idx != rf.me && replies[idx].VoteGranted && replies[idx].CurrentTerm == rf.currentTerm {
 					votes++
 				}
 			}
