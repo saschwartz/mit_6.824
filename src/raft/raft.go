@@ -133,7 +133,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogWarning
+	SetLogLevel LogLevel = LogInfo
 )
 
 // GetState returns currentTerm and whether this server
@@ -396,12 +396,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				(len(args.LogEntries) == 0 || idx <= args.LogEntries[len(args.LogEntries)-1].Index) &&
 				idx <= len(rf.log) {
 				// send acknowledgement to applyCh
+
+				rf.Log(LogInfo, "Sending applyCh confirmation for commit of ", rf.log[idx-1], "at index", idx)
 				rf.applyCh <- ApplyMsg{
 					CommandValid: true,
 					CommandIndex: idx,
 					Command:      rf.log[idx-1].Command,
 				}
-				rf.Log(LogDebug, "Sending applyCh confirmation for commit of ", rf.log[idx-1], "at index", idx)
 
 				// increment and update commit idx
 				rf.commitIndex = idx
@@ -650,7 +651,7 @@ func (rf *Raft) HeartbeatAppendEntries() {
 		// send messages to applyCh for every message that was committed
 		for origIndex < rf.commitIndex {
 			origIndex++
-			rf.Log(LogDebug, "Sending applyCh confirmation for commit of ", rf.log[origIndex-1], "at index", origIndex)
+			rf.Log(LogInfo, "Sending applyCh confirmation for commit of ", rf.log[origIndex-1], "at index", origIndex)
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				CommandIndex: origIndex,

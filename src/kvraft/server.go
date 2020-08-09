@@ -20,11 +20,14 @@ type Op struct {
 	ClientSerial int    // client's serial number for this command
 }
 
-type CachedClientResponse struct {
-	ClientSerial int
-	OpType       string
-	Value        string // string if "Get", else empty
-	Err          Err
+// information about an Op that has been applied to the KV
+// state machine
+// our RPC methods use this to determine client response
+type KVCommittedOp struct {
+	RaftMsg raft.ApplyMsg
+	KVOp    Op     // this is contained in RaftMsg already but this makes typing easier
+	Value   string // string if "Get", else empty
+	Err     Err
 }
 
 type KVServer struct {
@@ -41,18 +44,39 @@ type KVServer struct {
 	// actual app state is just a string -> string map
 	store map[string]string
 
+	// log of committed ops
+	// should mirror the underlying raft log
+	// but also includes info of kv state effects
+	committedOpsLog []KVCommittedOp
+
 	// this caches responses in case of crash recovery
 	// e.g. if we commit a message but fail before responding to client
 	// then we don't want to recommit.
 	// so we store a map of clientID -> (latest command serial, response)
-	latestResponse map[string]*CachedClientResponse
+	latestResponse map[string]KVCommittedOp
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	kv.Log(LogInfo, "Received [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key)
 
-	// if not cached, send request
-	if resp, ok := kv.latestResponse[args.ClientID]; !ok || resp.ClientSerial != args.ClientSerial {
-		_, _, isLeader := kv.rf.Start(Op{
+	// if resp is cached, serve it to avoid recommitting
+	kv.mu.Lock()
+	if resp, ok := kv.latestResponse[args.ClientID]; ok && resp.KVOp.ClientSerial == args.ClientSerial {
+		reply.Err = resp.Err
+		reply.Value = resp.Value
+
+		kv.Log(LogInfo, "Request already served, using cache [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key, "\n - reply.Value", reply.Value, "\n - reply.Err", reply.Err)
+
+		return
+	}
+	kv.mu.Unlock()
+
+	// else send request and wait for response
+	// we loop if another request is committed at the expected index
+	// (this might happen if another op is committed in a majority
+	// and we then catch up)
+	for {
+		expectedIdx, _, isLeader := kv.rf.Start(Op{
 			OpType:       "Get",
 			Key:          args.Key,
 			ClientID:     args.ClientID,
@@ -62,47 +86,105 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = ErrWrongLeader
 			return
 		}
-	}
 
-	// then loop until it shows up on cache and return
-	for {
-		kv.mu.Lock()
-		if resp, ok := kv.latestResponse[args.ClientID]; ok && resp.ClientSerial == args.ClientSerial {
-			reply.Err = resp.Err
-			reply.Value = resp.Value
+		// we keep reading info about committed ops until either
+		// 1. we see our op has been committed
+		//		=> give response to client
+		// 2. we see another op has been committed at our expected index
+		// 		=> break from loop to try another Start
+		for {
+			kv.mu.Lock()
+			if len(kv.committedOpsLog) >= expectedIdx &&
+				kv.committedOpsLog[expectedIdx-1].KVOp.ClientSerial == args.ClientSerial &&
+				kv.committedOpsLog[expectedIdx-1].KVOp.ClientID == args.ClientID {
+				// we saw our operation. give response to client and cache
+				reply.Err = kv.committedOpsLog[expectedIdx-1].Err
+				reply.Value = kv.committedOpsLog[expectedIdx-1].Value
+
+				kv.Log(LogInfo, "Responded to [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key, "\n - reply.Value:", reply.Value, "\n - reply.Err", reply.Err)
+
+				kv.latestResponse[args.ClientID] = kv.committedOpsLog[expectedIdx-1]
+				kv.mu.Unlock()
+				return
+			} else if len(kv.committedOpsLog) >= expectedIdx &&
+				(kv.committedOpsLog[expectedIdx-1].KVOp.ClientSerial != args.ClientSerial ||
+					kv.committedOpsLog[expectedIdx-1].KVOp.ClientID != args.ClientID) {
+
+				kv.Log(LogInfo, "Saw another message committed, retrying Start [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key, "\n - commitedOp.KVOp:", kv.committedOpsLog[expectedIdx-1].KVOp)
+
+				kv.mu.Unlock()
+				break
+			}
 			kv.mu.Unlock()
-			return
 		}
-		kv.mu.Unlock()
+
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	kv.Log(LogInfo, "Received [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value)
 
-	// if not cached, send request
-	if resp, ok := kv.latestResponse[args.ClientID]; !ok || resp.ClientSerial != args.ClientSerial {
-		_, _, isLeader := kv.rf.Start(Op{
+	// if resp is cached, serve it to avoid recommitting
+	kv.mu.Lock()
+	if resp, ok := kv.latestResponse[args.ClientID]; ok && resp.KVOp.ClientSerial == args.ClientSerial {
+		reply.Err = resp.Err
+
+		kv.Log(LogInfo, "Request already served, using cache [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - reply.Err", reply.Err)
+
+		return
+	}
+	kv.mu.Unlock()
+
+	// else send request and wait for response
+	// we loop if another request is committed at the expected index
+	// (this might happen if another op is committed in a majority
+	// and we then catch up)
+	for {
+		expectedIdx, _, isLeader := kv.rf.Start(Op{
 			OpType:       args.Op,
 			Key:          args.Key,
 			Value:        args.Value,
 			ClientID:     args.ClientID,
 			ClientSerial: args.ClientSerial,
 		})
+
+		kv.Log(LogDebug, "Called kv.rf.Start on [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - expectedIdx", expectedIdx, "\n - isLeader", isLeader)
+
 		if !isLeader {
 			reply.Err = ErrWrongLeader
 			return
 		}
-	}
 
-	// then loop until it shows up on cache and return
-	for {
-		kv.mu.Lock()
-		if resp, ok := kv.latestResponse[args.ClientID]; ok && resp.ClientSerial == args.ClientSerial {
-			reply.Err = resp.Err
+		// we keep reading info about committed ops until either
+		// 1. we see our op has been committed
+		//		=> give response to client
+		// 2. we see another op has been committed at our expected index
+		// 		=> break from loop to try another Start
+		for {
+			kv.Log(LogDebug, "waiting for appearance in log of [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - expectedIdx", expectedIdx)
+			kv.mu.Lock()
+
+			if len(kv.committedOpsLog) >= expectedIdx &&
+				kv.committedOpsLog[expectedIdx-1].KVOp.ClientSerial == args.ClientSerial &&
+				kv.committedOpsLog[expectedIdx-1].KVOp.ClientID == args.ClientID {
+				// we saw our operation. give response to client and cache
+				reply.Err = kv.committedOpsLog[expectedIdx-1].Err
+				kv.Log(LogInfo, "Responded to [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - reply.Err", reply.Err)
+
+				kv.latestResponse[args.ClientID] = kv.committedOpsLog[expectedIdx-1]
+				kv.mu.Unlock()
+				return
+			} else if len(kv.committedOpsLog) >= expectedIdx &&
+				(kv.committedOpsLog[expectedIdx-1].KVOp.ClientSerial != args.ClientSerial ||
+					kv.committedOpsLog[expectedIdx-1].KVOp.ClientID != args.ClientID) {
+				kv.Log(LogInfo, "Saw another message committed, retrying Start [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - commitedOp.KVOp:", kv.committedOpsLog[expectedIdx-1].KVOp)
+
+				kv.mu.Unlock()
+				break
+			}
 			kv.mu.Unlock()
-			return
 		}
-		kv.mu.Unlock()
+
 	}
 }
 
@@ -136,11 +218,15 @@ func (kv *KVServer) killed() bool {
 func (kv *KVServer) ScanApplyCh() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
-
 		kv.Log(LogDebug, "Received commit on applyCh:", msg)
 
-		kv.mu.Lock()
 		op, ok := msg.Command.(Op)
+		// if we find a no-op, don't do anything else in this loop
+		// and wait for next message
+		if !ok {
+			kv.Log(LogDebug, "Detected no-op commit, must have been an election.")
+			continue
+		}
 		err := Err(OK)
 
 		// Apply our operation to kv state
@@ -160,18 +246,17 @@ func (kv *KVServer) ScanApplyCh() {
 			}
 		}
 
-		// mark this message as processed in our client cache
-		// this will also trigger our RPC to respond to the Clerk
-		kv.latestResponse[op.ClientID] = &CachedClientResponse{
-			ClientSerial: op.ClientSerial,
-			OpType:       op.OpType,
-			Err:          err,
-		}
+		// add committed op to log
+		committedOp := KVCommittedOp{RaftMsg: msg, KVOp: op, Err: err}
 		if op.OpType == "Get" {
-			kv.latestResponse[op.ClientID].Value = val
+			committedOp.Value = val
 		}
-		kv.Log(LogDebug, "kv.latestResponse:", kv.latestResponse)
+		kv.mu.Lock()
+		kv.committedOpsLog = append(kv.committedOpsLog, committedOp)
 		kv.mu.Unlock()
+
+		kv.Log(LogInfo, "Store updated:", kv.store, "\n - committedOp", committedOp)
+		kv.Log(LogDebug, "Committed ops log extended:", kv.committedOpsLog)
 	}
 }
 
@@ -202,10 +287,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// initialize maps
-	kv.latestResponse = make(map[string]*CachedClientResponse)
+	kv.latestResponse = make(map[string]KVCommittedOp)
 	kv.store = make(map[string]string)
 
-	kv.Log(LogInfo, "Server started.")
+	kv.Log(LogDebug, "Server started.")
 
 	// start watching applyCh
 	go kv.ScanApplyCh()
