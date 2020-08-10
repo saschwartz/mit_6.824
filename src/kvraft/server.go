@@ -222,6 +222,7 @@ func (kv *KVServer) ApplyOp(op Op) KVAppliedOp {
 				kv.store[op.Key] += op.Value
 			}
 		}
+		kv.Log(LogInfo, "Store updated:", kv.store)
 	} else {
 		kv.Log(LogDebug, "Skipping store update, detected duplicate command.")
 	}
@@ -235,6 +236,7 @@ func (kv *KVServer) ApplyOp(op Op) KVAppliedOp {
 	if op.OpType == "Get" {
 		appliedOp.Value = val
 	}
+	kv.Log(LogDebug, "Applied op", appliedOp)
 	return appliedOp
 }
 
@@ -270,7 +272,6 @@ func (kv *KVServer) ScanApplyCh() {
 		kv.latestResponse[appliedOp.KVOp.ClientID] = kv.appliedOpsLog[appliedOp.Index-1]
 		kv.mu.Unlock()
 
-		kv.Log(LogInfo, "Store updated:", kv.store, "\n - appliedOp", appliedOp)
 		kv.Log(LogDebug, "Committed ops log extended:", kv.appliedOpsLog)
 	}
 }
