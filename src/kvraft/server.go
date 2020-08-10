@@ -67,57 +67,51 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 		kv.Log(LogInfo, "Request already served, using cache [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key, "\n - reply.Value", reply.Value, "\n - reply.Err", reply.Err)
 
+		kv.mu.Unlock()
 		return
 	}
 	kv.mu.Unlock()
 
 	// else send request and wait for response
-	// we loop if another request is committed at the expected index
-	// (this might happen if another op is committed in a majority
-	// and we then catch up)
-	for {
-		expectedIdx, _, isLeader := kv.rf.Start(Op{
-			OpType:       "Get",
-			Key:          args.Key,
-			ClientID:     args.ClientID,
-			ClientSerial: args.ClientSerial,
-		})
-		if !isLeader {
-			reply.Err = ErrWrongLeader
-			return
-		}
+	expectedIdx, _, isLeader := kv.rf.Start(Op{
+		OpType:       "Get",
+		Key:          args.Key,
+		ClientID:     args.ClientID,
+		ClientSerial: args.ClientSerial,
+	})
 
-		// we keep reading info about committed ops until either
-		// 1. we see our op has been committed
-		//		=> give response to client
-		// 2. we see another op has been committed at our expected index
-		// 		=> break from loop to try another Start
-		for {
-			kv.mu.Lock()
-			if len(kv.committedOpsLog) >= expectedIdx &&
-				kv.committedOpsLog[expectedIdx-1].KVOp.ClientSerial == args.ClientSerial &&
+	kv.Log(LogDebug, "Called kv.rf.Start on [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key, "\n - expectedIdx", expectedIdx, "\n - isLeader", isLeader)
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	// we keep reading info about committed ops until either
+	// we see op is committed and tell client success,
+	// or see something else got committed there and tell client
+	// ErrWrongLeader (so it will retry)
+	for {
+		kv.mu.Lock()
+		if len(kv.committedOpsLog) >= expectedIdx {
+			if kv.committedOpsLog[expectedIdx-1].KVOp.ClientSerial == args.ClientSerial &&
 				kv.committedOpsLog[expectedIdx-1].KVOp.ClientID == args.ClientID {
-				// we saw our operation. give response to client and cache
+				// we saw our operation. success!
 				reply.Err = kv.committedOpsLog[expectedIdx-1].Err
 				reply.Value = kv.committedOpsLog[expectedIdx-1].Value
-
-				kv.Log(LogInfo, "Responded to [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key, "\n - reply.Value:", reply.Value, "\n - reply.Err", reply.Err)
-
-				kv.latestResponse[args.ClientID] = kv.committedOpsLog[expectedIdx-1]
-				kv.mu.Unlock()
-				return
-			} else if len(kv.committedOpsLog) >= expectedIdx &&
-				(kv.committedOpsLog[expectedIdx-1].KVOp.ClientSerial != args.ClientSerial ||
-					kv.committedOpsLog[expectedIdx-1].KVOp.ClientID != args.ClientID) {
-
-				kv.Log(LogInfo, "Saw another message committed, retrying Start [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key, "\n - commitedOp.KVOp:", kv.committedOpsLog[expectedIdx-1].KVOp)
-
-				kv.mu.Unlock()
-				break
+			} else {
+				// some other op got committed there. failure
+				reply.Err = ErrWrongLeader
 			}
-			kv.mu.Unlock()
-		}
+			// cache response and return
+			kv.latestResponse[args.ClientID] = kv.committedOpsLog[expectedIdx-1]
 
+			kv.Log(LogInfo, "Responded to [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key, "\n - reply.Value:", reply.Value, "\n - reply.Err", reply.Err)
+
+			kv.mu.Unlock()
+			return
+		}
+		kv.mu.Unlock()
 	}
 }
 
@@ -131,60 +125,51 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 		kv.Log(LogInfo, "Request already served, using cache [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - reply.Err", reply.Err)
 
+		kv.mu.Unlock()
 		return
 	}
 	kv.mu.Unlock()
 
 	// else send request and wait for response
-	// we loop if another request is committed at the expected index
-	// (this might happen if another op is committed in a majority
-	// and we then catch up)
+	expectedIdx, _, isLeader := kv.rf.Start(Op{
+		OpType:       args.Op,
+		Key:          args.Key,
+		Value:        args.Value,
+		ClientID:     args.ClientID,
+		ClientSerial: args.ClientSerial,
+	})
+
+	kv.Log(LogDebug, "Called kv.rf.Start on [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - expectedIdx", expectedIdx, "\n - isLeader", isLeader)
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	// we keep reading info about committed ops until either
+	// we see op is committed and tell client success,
+	// or see something else got committed there and tell client
+	// ErrWrongLeader (so it will retry)
 	for {
-		expectedIdx, _, isLeader := kv.rf.Start(Op{
-			OpType:       args.Op,
-			Key:          args.Key,
-			Value:        args.Value,
-			ClientID:     args.ClientID,
-			ClientSerial: args.ClientSerial,
-		})
+		kv.mu.Lock()
+		if len(kv.committedOpsLog) >= expectedIdx {
+			if kv.committedOpsLog[expectedIdx-1].KVOp.ClientSerial == args.ClientSerial &&
+				kv.committedOpsLog[expectedIdx-1].KVOp.ClientID == args.ClientID {
+				// we saw our operation. success!
+				reply.Err = kv.committedOpsLog[expectedIdx-1].Err
+			} else {
+				// some other op got committed there. failure
+				reply.Err = ErrWrongLeader
+			}
+			// cache response and return
+			kv.latestResponse[args.ClientID] = kv.committedOpsLog[expectedIdx-1]
 
-		kv.Log(LogDebug, "Called kv.rf.Start on [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - expectedIdx", expectedIdx, "\n - isLeader", isLeader)
+			kv.Log(LogInfo, "Responded to [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - reply.Err", reply.Err)
 
-		if !isLeader {
-			reply.Err = ErrWrongLeader
+			kv.mu.Unlock()
 			return
 		}
-
-		// we keep reading info about committed ops until either
-		// 1. we see our op has been committed
-		//		=> give response to client
-		// 2. we see another op has been committed at our expected index
-		// 		=> break from loop to try another Start
-		for {
-			kv.Log(LogDebug, "waiting for appearance in log of [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - expectedIdx", expectedIdx)
-			kv.mu.Lock()
-
-			if len(kv.committedOpsLog) >= expectedIdx &&
-				kv.committedOpsLog[expectedIdx-1].KVOp.ClientSerial == args.ClientSerial &&
-				kv.committedOpsLog[expectedIdx-1].KVOp.ClientID == args.ClientID {
-				// we saw our operation. give response to client and cache
-				reply.Err = kv.committedOpsLog[expectedIdx-1].Err
-				kv.Log(LogInfo, "Responded to [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - reply.Err", reply.Err)
-
-				kv.latestResponse[args.ClientID] = kv.committedOpsLog[expectedIdx-1]
-				kv.mu.Unlock()
-				return
-			} else if len(kv.committedOpsLog) >= expectedIdx &&
-				(kv.committedOpsLog[expectedIdx-1].KVOp.ClientSerial != args.ClientSerial ||
-					kv.committedOpsLog[expectedIdx-1].KVOp.ClientID != args.ClientID) {
-				kv.Log(LogInfo, "Saw another message committed, retrying Start [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - commitedOp.KVOp:", kv.committedOpsLog[expectedIdx-1].KVOp)
-
-				kv.mu.Unlock()
-				break
-			}
-			kv.mu.Unlock()
-		}
-
+		kv.mu.Unlock()
 	}
 }
 
