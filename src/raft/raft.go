@@ -133,7 +133,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogInfo
+	SetLogLevel LogLevel = LogWarning
 )
 
 // GetState returns currentTerm and whether this server
