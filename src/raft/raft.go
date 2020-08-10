@@ -133,7 +133,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogWarning
+	SetLogLevel LogLevel = LogInfo
 )
 
 // GetState returns currentTerm and whether this server
@@ -745,6 +745,14 @@ func (rf *Raft) RunElection() {
 						rf.matchIndex[idx] = 0
 					}
 				}
+
+				// commit a "no-op" so that entries from previous terms eligible for
+				// commitment will be found and committed
+				rf.log = append(rf.log, LogEntry{
+					Index:   len(rf.log) + 1,
+					Term:    rf.currentTerm,
+					Command: "no-op",
+				})
 
 				rf.mu.Unlock()
 				go rf.HeartbeatAppendEntries()

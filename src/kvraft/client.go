@@ -70,11 +70,11 @@ func (ck *Clerk) Get(key string) string {
 
 	// keep trying operation until succeeds
 	for {
-		ck.Log(LogDebug, "Client sending [ KV", ck.leaderIdx, "] [ Request", ck.clientSerial, "] Get", key)
+		ck.Log(LogDebug, "Client sending [ leaderIdx", ck.leaderIdx, "] [ Request", ck.clientSerial, "] Get", key)
 
 		ok := ck.servers[ck.leaderIdx].Call("KVServer.Get", &args, &reply)
 
-		ck.Log(LogDebug, "RPC returned [ KV", ck.leaderIdx, "] [ Request", ck.clientSerial, "] Get", key, "\n - ok", ok, "\n - reply.Value", reply.Value, "\n - reply.Err", reply.Err)
+		ck.Log(LogDebug, "RPC returned [ leaderIdx", ck.leaderIdx, "] [ Request", ck.clientSerial, "] Get", key, "\n - ok", ok, "\n - reply.Value", reply.Value, "\n - reply.Err", reply.Err)
 
 		if ok && reply.Err != "ErrWrongLeader" {
 			// all good, return value
@@ -112,11 +112,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	// keep trying operation until succeeds
 	for {
-		ck.Log(LogDebug, "Client sending [ KV", ck.leaderIdx, "] [ Request", ck.clientSerial, "]", op, key, value)
+		ck.Log(LogDebug, "Client sending [ leaderIdx", ck.leaderIdx, "] [ Request", ck.clientSerial, "]", op, key, value)
 
 		ok := ck.servers[ck.leaderIdx].Call("KVServer.PutAppend", &args, &reply)
 
-		ck.Log(LogDebug, "RPC returned [ KV", ck.leaderIdx, "] [ Request", ck.clientSerial, "]", op, key, value, "\n - ok", ok, "\n - reply.Err", reply.Err)
+		ck.Log(LogDebug, "RPC returned [ leaderIdx", ck.leaderIdx, "] [ Request", ck.clientSerial, "]", op, key, value, "\n - ok", ok, "\n - reply.Err", reply.Err)
 
 		if ok && reply.Err != "ErrWrongLeader" {
 			// all good, return

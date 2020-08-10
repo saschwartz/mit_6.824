@@ -206,20 +206,28 @@ func (kv *KVServer) ScanApplyCh() {
 		kv.Log(LogDebug, "Received commit on applyCh:", msg)
 
 		op, ok := msg.Command.(Op)
-		err := Err(OK)
+		// might find a no-op - just log it, add it to log and keep looping
+		if !ok {
+			kv.Log(LogDebug, "Saw a no-op - skipping state machine update and waiting for next message.")
+			kv.mu.Lock()
+			kv.committedOpsLog = append(kv.committedOpsLog, KVCommittedOp{RaftMsg: msg, KVOp: Op{OpType: "no-op"}})
+			kv.mu.Unlock()
+			continue
+		}
 
-		// Apply our operation to kv state
+		// If a valid op, then add apply it to KV state and store it in log
+		err := Err(OK)
 		val, ok := kv.store[op.Key]
 		if op.OpType == "Get" && !ok {
-			// if a Get, fetch the key from store
+			// Get
 			err = Err(ErrNoKey)
 		} else if op.OpType == "Put" {
-			// if a Put, update the key in the store
+			// Put
 			kv.store[op.Key] = op.Value
 		} else if op.OpType == "Append" {
-			// if an Append, either append to key or Put
+			// Append (may need to just Put)
 			if !ok {
-				kv.store[op.Key] = op.Value
+				kv.store[op.Key] = op.Value // should this be ErrNoKey?
 			} else {
 				kv.store[op.Key] += op.Value
 			}
@@ -284,7 +292,7 @@ func (kv *KVServer) Log(level LogLevel, a ...interface{}) {
 		pc, _, ln, _ := runtime.Caller(1)
 		rp := regexp.MustCompile(".+\\.([a-zA-Z]+)")
 		funcName := rp.FindStringSubmatch(runtime.FuncForPC(pc).Name())[1]
-		data := append([]interface{}{level, "[ KV ", kv.me, "]", "[", funcName, ln, "]"}, a...)
+		data := append([]interface{}{level, "[ KV", kv.me, "]", "[", funcName, ln, "]"}, a...)
 		fmt.Println(data...)
 	}
 }
