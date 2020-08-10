@@ -24,10 +24,10 @@ type Op struct {
 // state machine
 // our RPC methods use this to determine client response
 type KVAppliedOp struct {
-	RaftMsg raft.ApplyMsg
-	KVOp    Op     // this is contained in RaftMsg already but this makes typing easier
-	Value   string // string if "Get", else empty
-	Err     Err
+	Index int
+	KVOp  Op     // this is contained in RaftMsg already but this makes typing easier
+	Value string // string if "Get", else empty
+	Err   Err
 }
 
 type KVServer struct {
@@ -119,10 +119,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		// some other op got committed there. failure
 		reply.Err = ErrWrongLeader
 	}
-	// cache response and return
-	kv.mu.Lock()
-	kv.latestResponse[args.ClientID] = kv.appliedOpsLog[expectedIdx-1]
-	kv.mu.Unlock()
 
 	kv.Log(LogInfo, "Responded to [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key, "\n - reply.Value:", reply.Value, "\n - reply.Err", reply.Err)
 
@@ -174,10 +170,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		// some other op got committed there. failure
 		reply.Err = ErrWrongLeader
 	}
-	// cache response and return
-	kv.mu.Lock()
-	kv.latestResponse[args.ClientID] = kv.appliedOpsLog[expectedIdx-1]
-	kv.mu.Unlock()
 
 	kv.Log(LogInfo, "Responded to [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value, "\n - reply.Err", reply.Err)
 
@@ -205,6 +197,47 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
+// ApplyOp is a helper function to
+// apply an operation and return the applied operation
+// don't lock - that's handled by the caller
+func (kv *KVServer) ApplyOp(op Op) KVAppliedOp {
+	err := Err(OK)
+	val, keyOk := kv.store[op.Key]
+
+	// only do the store modification if we haven't already
+	// seen this request (can happen if a leader crashes after comitting
+	// but before responding to client)
+	if prevOp, ok := kv.latestResponse[op.ClientID]; !ok || prevOp.KVOp.ClientSerial != op.ClientSerial {
+		if op.OpType == "Get" && !keyOk {
+			// Get
+			err = Err(ErrNoKey)
+		} else if op.OpType == "Put" {
+			// Put
+			kv.store[op.Key] = op.Value
+		} else if op.OpType == "Append" {
+			// Append (may need to just Put)
+			if !keyOk {
+				kv.store[op.Key] = op.Value // should this be ErrNoKey?
+			} else {
+				kv.store[op.Key] += op.Value
+			}
+		}
+	} else {
+		kv.Log(LogDebug, "Skipping store update, detected duplicate command.")
+	}
+
+	// create the op, add the Value field if a Get
+	appliedOp := KVAppliedOp{
+		Index: len(kv.appliedOpsLog) + 1,
+		KVOp:  op,
+		Err:   err,
+	}
+	if op.OpType == "Get" {
+		appliedOp.Value = val
+	}
+	return appliedOp
+}
+
 // ScanApplyCh is a long running goroutine that continuously
 // monitors the relevant raft server's applyCh
 //
@@ -217,40 +250,24 @@ func (kv *KVServer) ScanApplyCh() {
 		kv.Log(LogDebug, "Received commit on applyCh:", msg)
 
 		op, ok := msg.Command.(Op)
-		// might find a no-op - just log it, add it to log and keep looping
 		if !ok {
+			// might find a no-op - just log it, add it to log and keep looping
 			kv.Log(LogDebug, "Saw a no-op - skipping state machine update and waiting for next message.")
 			kv.mu.Lock()
-			kv.appliedOpsLog = append(kv.appliedOpsLog, KVAppliedOp{RaftMsg: msg, KVOp: Op{OpType: "no-op"}})
+			kv.appliedOpsLog = append(kv.appliedOpsLog, KVAppliedOp{
+				Index: len(kv.appliedOpsLog) + 1,
+				KVOp:  Op{OpType: "no-op"},
+			})
 			kv.mu.Unlock()
 			continue
 		}
 
-		// If a valid op, then add apply it to KV state and store it in log
-		err := Err(OK)
-		val, ok := kv.store[op.Key]
-		if op.OpType == "Get" && !ok {
-			// Get
-			err = Err(ErrNoKey)
-		} else if op.OpType == "Put" {
-			// Put
-			kv.store[op.Key] = op.Value
-		} else if op.OpType == "Append" {
-			// Append (may need to just Put)
-			if !ok {
-				kv.store[op.Key] = op.Value // should this be ErrNoKey?
-			} else {
-				kv.store[op.Key] += op.Value
-			}
-		}
-
-		// add committed op to log
-		appliedOp := KVAppliedOp{RaftMsg: msg, KVOp: op, Err: err}
-		if op.OpType == "Get" {
-			appliedOp.Value = val
-		}
+		// if a valid op, apply op to state and add to log
+		// ensure to cache response to prevent re-applications later on!
+		appliedOp := kv.ApplyOp(op)
 		kv.mu.Lock()
 		kv.appliedOpsLog = append(kv.appliedOpsLog, appliedOp)
+		kv.latestResponse[appliedOp.KVOp.ClientID] = kv.appliedOpsLog[appliedOp.Index-1]
 		kv.mu.Unlock()
 
 		kv.Log(LogInfo, "Store updated:", kv.store, "\n - appliedOp", appliedOp)
@@ -290,7 +307,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.Log(LogDebug, "Server started.")
 
-	// start watching applyCh
+	// start watching applyCh only after replay is complete
 	go kv.ScanApplyCh()
 
 	return kv
