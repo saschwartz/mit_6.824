@@ -206,12 +206,6 @@ func (kv *KVServer) ScanApplyCh() {
 		kv.Log(LogDebug, "Received commit on applyCh:", msg)
 
 		op, ok := msg.Command.(Op)
-		// if we find a no-op, don't do anything else in this loop
-		// and wait for next message
-		if !ok {
-			kv.Log(LogDebug, "Detected no-op commit, must have been an election.")
-			continue
-		}
 		err := Err(OK)
 
 		// Apply our operation to kv state
