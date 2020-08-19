@@ -176,6 +176,11 @@ func (rf *Raft) getRaftLogIndex(idx int) int {
 		return -1
 	} else {
 		logIdx := idx - rf.log[0].Index
+		if logIdx < 0 {
+			return -1
+		} else {
+			return logIdx
+		}
 	}
 }
 
