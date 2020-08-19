@@ -1,17 +1,26 @@
 package kvraft
 
 import (
+	"bytes"
 	"fmt"
 	"regexp"
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"../labgob"
 	"../labrpc"
 	"../raft"
 )
 
+// to give raft time to actually delete logs between polling times
+const snapshotPollInterval = time.Duration(100) * time.Millisecond
+
+// at what % of maxraftsize should we snapshot
+const maxStateThreshold float64 = 0.85
+
+// Op is the 'Command' stored in each raft log entry
 type Op struct {
 	OpType       string // "Append" / "Put" / "Get"
 	Key          string // always present
@@ -20,11 +29,12 @@ type Op struct {
 	ClientSerial int    // client's serial number for this command
 }
 
-// information about an Op that has been applied to the KV
-// state machine
+// KVAppliedOp stores information about an Op that has
+// been applied to the KV state machine
 // our RPC methods use this to determine client response
 type KVAppliedOp struct {
 	Index int
+	Term  int    // need this for snapshotting
 	KVOp  Op     // this is contained in RaftMsg already but this makes typing easier
 	Value string // string if "Get", else empty
 	Err   Err
@@ -39,7 +49,8 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
+	// persister that kv.rf also contains
+	persister *raft.Persister
 
 	// actual app state is just a string -> string map
 	store map[string]string
@@ -200,7 +211,7 @@ func (kv *KVServer) killed() bool {
 // ApplyOp is a helper function to
 // apply an operation and return the applied operation
 // don't lock - that's handled by the caller
-func (kv *KVServer) ApplyOp(op Op) KVAppliedOp {
+func (kv *KVServer) ApplyOp(op Op, opIndex int, opTerm int) KVAppliedOp {
 	err := Err(OK)
 	val, keyOk := kv.store[op.Key]
 
@@ -229,7 +240,8 @@ func (kv *KVServer) ApplyOp(op Op) KVAppliedOp {
 
 	// create the op, add the Value field if a Get
 	appliedOp := KVAppliedOp{
-		Index: len(kv.appliedOpsLog) + 1,
+		Term:  opTerm,
+		Index: opIndex,
 		KVOp:  op,
 		Err:   err,
 	}
@@ -266,13 +278,45 @@ func (kv *KVServer) ScanApplyCh() {
 
 		// if a valid op, apply op to state and add to log
 		// ensure to cache response to prevent re-applications later on!
-		appliedOp := kv.ApplyOp(op)
+		appliedOp := kv.ApplyOp(op, msg.CommandIndex, msg.CommandTerm)
 		kv.mu.Lock()
 		kv.appliedOpsLog = append(kv.appliedOpsLog, appliedOp)
 		kv.latestResponse[appliedOp.KVOp.ClientID] = kv.appliedOpsLog[appliedOp.Index-1]
 		kv.mu.Unlock()
 
 		kv.Log(LogDebug, "Committed ops log extended:", kv.appliedOpsLog)
+	}
+}
+
+func (kv *KVServer) snapshotWatch() {
+	for !kv.killed() {
+		if float64(kv.persister.RaftStateSize()) > float64(kv.maxraftstate)*maxStateThreshold {
+			kv.Log(LogDebug, "maxraftstate size exceeded, need to snapshot.")
+
+			// create snapshot bytes. we store the store, our latestResponse
+			// cache (for consistent duplicate detection across snapshots)
+			// and the lastIncludedIndex and lastIncludedTerm for our
+			// snapshot (to keep raft appendEntries working for the next
+			// entry it gets post snapshot)
+			kv.mu.Lock()
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(kv.store)
+			e.Encode(kv.latestResponse)
+			lastIncludedIndex := len(kv.appliedOpsLog)
+			lastIncludedTerm := kv.appliedOpsLog[lastIncludedIndex-1].Term
+			e.Encode(lastIncludedIndex)
+			e.Encode(lastIncludedTerm)
+			snapshot := w.Bytes()
+			kv.mu.Unlock()
+
+			// save state and snapshot
+			data := kv.rf.GetStateBytes(true)
+			kv.persister.SaveStateAndSnapshot(data, snapshot)
+
+			kv.Log(LogInfo, "Saved raft state and snapshot")
+		}
+		time.Sleep(snapshotPollInterval)
 	}
 }
 
@@ -302,6 +346,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	// store our persister
+	kv.persister = persister
+
 	// initialize maps
 	kv.latestResponse = make(map[string]KVAppliedOp)
 	kv.store = make(map[string]string)
@@ -310,6 +357,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// start watching applyCh only after replay is complete
 	go kv.ScanApplyCh()
+
+	// start snapshotting routine
+	go kv.snapshotWatch()
 
 	return kv
 }

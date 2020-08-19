@@ -51,6 +51,19 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
+}
+
+// Snapshot is a struct for snapshots created
+// by the kv server and sent to raft
+type Snapshot struct {
+	// for appendEntries consistency check on log entry
+	// following the snapshot
+	lastIncludedIndex int
+	lastIncludedTerm  int
+
+	// actual app state is just a string -> string map
+	store map[string]string
 }
 
 // LogEntry is a struct for info about a single log entry
@@ -100,21 +113,24 @@ type Raft struct {
 
 	// for passing info about comitted messages to tester code
 	applyCh chan ApplyMsg
+
+	// most recent snapshot, if any
+	snapshot *Snapshot
 }
 
-// HeartbeatSendInterval is How often do we send hearbeats
-const HeartbeatSendInterval = time.Duration(50) * time.Millisecond
+// heartbeatSendInterval is How often do we send hearbeats
+const heartbeatSendInterval = time.Duration(50) * time.Millisecond
 
-// DefaultPollInterval is how often to poll for election timeout, and the election parameters
-const DefaultPollInterval = time.Duration(50) * time.Millisecond
+// defaultPollInterval is how often to poll for election timeout, and the election parameters
+const defaultPollInterval = time.Duration(50) * time.Millisecond
 
-// MinElectionTimeout gives the lower bound on the randomly generated
+// minElectionTimeout gives the lower bound on the randomly generated
 // election timeout window in ms
-const MinElectionTimeout = 500
+const minElectionTimeout = 500
 
-// MaxElectionTimeout gives the upper bound on the randomly generated
+// maxElectionTimeout gives the upper bound on the randomly generated
 // election timeout window in ms
-const MaxElectionTimeout = 2500
+const maxElectionTimeout = 2500
 
 // LogLevel state types and consts
 type LogLevel int
@@ -143,21 +159,22 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, (rf.state == Leader)
 }
 
-//
-// save Raft's persistent state to stable storage,
+// GetStateBytes gets raft's state as a bytes array
+// lock is optional since we may be calling this within a critical section
+// already
+// this then allows the state data to be saved to stable storage,
 // where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-//
-func (rf *Raft) persist() {
-	// we don't bother locking, because we only call
-	// rf.persist from functions where we already hold the lock
+func (rf *Raft) GetStateBytes(lock bool) []byte {
+	if lock {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+	}
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	return w.Bytes()
 }
 
 //
@@ -246,13 +263,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.CandidateTerm
 		if rf.state == Leader {
 			rf.state = Follower
-			go rf.HeartbeatTimeoutCheck()
+			go rf.heartbeatTimeoutCheck()
 		}
 	}
 	reply.CurrentTerm = rf.currentTerm
 
 	// persist - we may have changed rf.currentTerm or rf.votedFor
-	rf.persist()
+	data := rf.GetStateBytes(false)
+	rf.persister.SaveRaftState(data)
 	return
 }
 
@@ -341,7 +359,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTimeout = GetRandomElectionTimeout()
 	if rf.state != Follower {
 		rf.state = Follower
-		go rf.HeartbeatTimeoutCheck()
+		go rf.heartbeatTimeoutCheck()
 	}
 	rf.currentTerm = args.LeaderTerm
 	reply.CurrentTerm = rf.currentTerm
@@ -401,6 +419,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.applyCh <- ApplyMsg{
 					CommandValid: true,
 					CommandIndex: idx,
+					CommandTerm:  rf.currentTerm,
 					Command:      rf.log[idx-1].Command,
 				}
 
@@ -422,7 +441,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Returned = true
 
 	// persist - we may have changed rf.currentTerm or rf.log
-	rf.persist()
+	data := rf.GetStateBytes(false)
+	rf.persister.SaveRaftState(data)
 
 	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderID, "term", args.LeaderTerm, "\n  - args.LogEntries:", args.LogEntries, "\n  - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n  - rf.log", rf.log, "\n  - rf.commitIndex", rf.commitIndex, "\n  - args.PrevLogIndex", args.PrevLogIndex, "\n  - args.PrevLogTerm", args.PrevLogTerm, "\n  - reply.LogLength", reply.LogLength, "\n  - reply.ConflictingEntryTerm", reply.ConflictingEntryTerm, "\n  - reply.IndexFirstConflictingTerm", reply.IndexFirstConflictingTerm, "\n  - success:", reply.Success)
 	return
@@ -485,7 +505,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.Log(LogDebug, "Start called, current log:", rf.log, "\n  - rf.matchIndex: ", rf.matchIndex)
 
 	// persist - we may have changed rf.log
-	rf.persist()
+	data := rf.GetStateBytes(false)
+	rf.persister.SaveRaftState(data)
 
 	return entry.Index, entry.Term, true
 }
@@ -514,13 +535,13 @@ func (rf *Raft) killed() bool {
 
 // GetRandomElectionTimeout gets a random election timeout window
 func GetRandomElectionTimeout() time.Duration {
-	return time.Duration(MinElectionTimeout+rand.Intn(MaxElectionTimeout-MinElectionTimeout)) * time.Millisecond
+	return time.Duration(minElectionTimeout+rand.Intn(maxElectionTimeout-minElectionTimeout)) * time.Millisecond
 }
 
-// HeartbeatTimeoutCheck implements election timeout
+// heartbeatTimeoutCheck implements election timeout
 // for a Raft server, by continually runs a check as to whether sending
 // out RequestVote is needed due to heartbeat timeout
-func (rf *Raft) HeartbeatTimeoutCheck() {
+func (rf *Raft) heartbeatTimeoutCheck() {
 	// get heartbeat check start time
 	lastHeartbeatCheck := time.Now()
 	for !rf.killed() {
@@ -535,21 +556,21 @@ func (rf *Raft) HeartbeatTimeoutCheck() {
 			// quit this function and run the election
 			rf.Log(LogInfo, "timed out as follower, running election.")
 			rf.mu.Unlock()
-			go rf.RunElection()
+			go rf.runElection()
 			return
 		}
 		rf.mu.Unlock()
-		time.Sleep(DefaultPollInterval)
+		time.Sleep(defaultPollInterval)
 	}
 }
 
-// HeartbeatAppendEntries is the leader routine for sending out
+// heartbeatAppendEntries is the leader routine for sending out
 // AppendEntries requests to servers
 //
 // The contents of these are dictated by rf.nextIndex[] for each server
 //
 // The requests are send on a heartbeat interval
-func (rf *Raft) HeartbeatAppendEntries() {
+func (rf *Raft) heartbeatAppendEntries() {
 	// make server -> reply map
 	replies := make(map[int]*AppendEntriesReply)
 	for idx := range rf.peers {
@@ -586,9 +607,10 @@ func (rf *Raft) HeartbeatAppendEntries() {
 						rf.currentTerm = replies[idx].CurrentTerm
 
 						// persist - updated current term
-						rf.persist()
+						data := rf.GetStateBytes(false)
+						rf.persister.SaveRaftState(data)
 
-						go rf.HeartbeatTimeoutCheck()
+						go rf.heartbeatTimeoutCheck()
 						rf.mu.Unlock()
 						return
 					}
@@ -655,25 +677,27 @@ func (rf *Raft) HeartbeatAppendEntries() {
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				CommandIndex: origIndex,
+				CommandTerm:  rf.currentTerm,
 				Command:      rf.log[origIndex-1].Command,
 			}
 		}
 
 		rf.mu.Unlock()
-		time.Sleep(HeartbeatSendInterval)
+		time.Sleep(heartbeatSendInterval)
 	}
 }
 
-// RunElection turns a Raft server into a candidate
+// runElection turns a Raft server into a candidate
 // and executes the election procedure
-func (rf *Raft) RunElection() {
+func (rf *Raft) runElection() {
 	// get election start time
 	lastElectionCheck := time.Now()
 
 	rf.mu.Lock()
 	rf.currentTerm++
 	// persist - updated current term
-	rf.persist()
+	data := rf.GetStateBytes(false)
+	rf.persister.SaveRaftState(data)
 	rf.Log(LogInfo, "running as candidate")
 
 	// set as candidate state and vote for ourselves,
@@ -755,18 +779,18 @@ func (rf *Raft) RunElection() {
 				})
 
 				rf.mu.Unlock()
-				go rf.HeartbeatAppendEntries()
+				go rf.heartbeatAppendEntries()
 				return
 			}
 		} else {
 			// no result - need to rerun election
 			rf.Log(LogInfo, "timed out as candidate")
 			rf.mu.Unlock()
-			go rf.RunElection()
+			go rf.runElection()
 			return
 		}
 		rf.mu.Unlock()
-		time.Sleep(DefaultPollInterval)
+		time.Sleep(defaultPollInterval)
 	}
 }
 
@@ -815,7 +839,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start election timeout check - server can't be a leader when created
-	go rf.HeartbeatTimeoutCheck()
+	go rf.heartbeatTimeoutCheck()
 
 	return rf
 }
