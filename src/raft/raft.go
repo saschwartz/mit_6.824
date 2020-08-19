@@ -54,18 +54,6 @@ type ApplyMsg struct {
 	CommandTerm  int
 }
 
-// Snapshot is a struct for snapshots created
-// by the kv server and sent to raft
-type Snapshot struct {
-	// for appendEntries consistency check on log entry
-	// following the snapshot
-	lastIncludedIndex int
-	lastIncludedTerm  int
-
-	// actual app state is just a string -> string map
-	store map[string]string
-}
-
 // LogEntry is a struct for info about a single log entry
 //
 type LogEntry struct {
@@ -114,8 +102,9 @@ type Raft struct {
 	// for passing info about comitted messages to tester code
 	applyCh chan ApplyMsg
 
-	// most recent snapshot, if any
-	snapshot *Snapshot
+	// from most recent snapshot, if any
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 // heartbeatSendInterval is How often do we send hearbeats
@@ -175,6 +164,19 @@ func (rf *Raft) GetStateBytes(lock bool) []byte {
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
 	return w.Bytes()
+}
+
+// if the raft log has been trimmed, need to convert
+// from target log index -> actual index in raft
+// return -1 if log is empty or log with this index precedes the log
+// if it exceeds the log, still return the expected index
+// can only call this when lock is already acquired!
+func (rf *Raft) getRaftLogIndex(idx int) int {
+	if len(rf.log) == 0 {
+		return -1
+	} else {
+		logIdx := idx - rf.log[0].Index
+	}
 }
 
 //
@@ -367,7 +369,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// leader's nextIndex is out of whack.
 	// trim log back accordingly
 	if args.PrevLogIndex >= 0 &&
-		(len(rf.log) < args.PrevLogIndex || rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
+		(len(rf.log) < rf.getRaftLogIndex(args.PrevLogIndex) || rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
 		// prev log is incorrect, need to roll back
 		reply.Success = false
 
@@ -794,6 +796,25 @@ func (rf *Raft) runElection() {
 	}
 }
 
+func (rf *Raft) watchForSnapshot() {
+	for !rf.killed() {
+		data := rf.persister.ReadSnapshot()
+		r := bytes.NewBuffer(data)
+		d := labgob.NewDecoder(r)
+		var lastIncludedIndex, lastIncludedTerm int
+		if d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil {
+			rf.Log(LogError, "Error reading persistent snapshot.")
+		} else {
+			rf.Log(LogInfo, "New snapshot spotted.", "\n - lastIncludedIndex", lastIncludedIndex, "\n - lastIncludedTerm", lastIncludedTerm)
+
+			rf.mu.Lock()
+			rf.lastIncludedIndex = lastIncludedIndex
+			rf.lastIncludedTerm = lastIncludedTerm
+			rf.mu.Unlock()
+		}
+	}
+}
+
 // Make creates a raft server
 //
 // the service or tester wants to create a Raft server. the ports
@@ -840,6 +861,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start election timeout check - server can't be a leader when created
 	go rf.heartbeatTimeoutCheck()
+
+	// trim logs if a new snapshot appears
+	go rf.watchForSnapshot()
 
 	return rf
 }
