@@ -437,7 +437,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.ConflictingEntryTerm = -1
 		reply.IndexFirstConflictingTerm = -1
 		prevRaftLogIndex := rf.getRaftLogIndex(args.PrevLogIndex)
-		if prevRaftLogIndex < len(rf.log) {
+		if len(rf.log) > 0 && prevRaftLogIndex < len(rf.log) {
 			reply.ConflictingEntryTerm = rf.log[prevRaftLogIndex].Term
 			reply.IndexFirstConflictingTerm = args.PrevLogIndex
 			for reply.IndexFirstConflictingTerm-1 > rf.log[0].Index &&
@@ -880,7 +880,7 @@ func (rf *Raft) runElection() {
 				// get next index of the log for rf.nextIndex
 				nextIdx := rf.lastIncludedIndex + 1
 				if len(rf.log) > 0 {
-					nextIdx = rf.log[len(rf.log)-1].Index
+					nextIdx = rf.log[len(rf.log)-1].Index + 1
 				}
 
 				// this volatile state is reinitialized on election
