@@ -753,10 +753,8 @@ func (rf *Raft) heartbeatAppendEntries() {
 				// send a new append entries request to the server if the last one has finished
 				replies[servIdx] = &AppendEntriesReply{}
 				entries := []LogEntry{}
-				entryIdx := rf.getRaftLogIndex(rf.nextIndex[servIdx])
-				for entryIdx >= 0 && entryIdx < len(rf.log) {
-					entries = append(entries, rf.log[entryIdx])
-					entryIdx++
+				if len(rf.log) > 0 {
+					entries = rf.log[rf.getRaftLogIndex(rf.nextIndex[servIdx]):]
 				}
 				args := &AppendEntriesArgs{
 					LeaderTerm:        rf.currentTerm,
@@ -938,6 +936,7 @@ func (rf *Raft) watchForSnapshot() {
 			rf.lastIncludedTerm = s.LastIncludedTerm
 			rf.mu.Unlock()
 		}
+		time.Sleep(defaultPollInterval)
 	}
 }
 
