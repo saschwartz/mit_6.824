@@ -67,6 +67,14 @@ type KVServer struct {
 	latestResponse map[string]KVAppliedOp
 }
 
+// Snapshot is the persistent snapshot to encode and decode
+type Snapshot struct {
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	LatestResponse    map[string]KVAppliedOp // to avoid duplicates after snapshot installation
+	Store             map[string]string
+}
+
 // WaitForAppliedOp is a helper function to continually loop
 // and wait for an applied op with ClientID and ClientSerial
 // to appear in the log at idx
@@ -301,19 +309,19 @@ func (kv *KVServer) snapshotWatch() {
 			kv.mu.Lock()
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)
-			e.Encode(kv.store)
-			e.Encode(kv.latestResponse)
-			lastIncludedIndex := len(kv.appliedOpsLog)
-			lastIncludedTerm := kv.appliedOpsLog[lastIncludedIndex-1].Term
-			e.Encode(lastIncludedIndex)
-			e.Encode(lastIncludedTerm)
+
+			e.Encode(Snapshot{
+				LastIncludedIndex: len(kv.appliedOpsLog),
+				LastIncludedTerm:  kv.appliedOpsLog[len(kv.appliedOpsLog)-1].Term,
+				Store:             kv.store,
+				LatestResponse:    kv.latestResponse,
+			})
 			snapshot := w.Bytes()
 			kv.mu.Unlock()
 
 			// save state and snapshot
 			data := kv.rf.GetStateBytes(true)
 			kv.persister.SaveStateAndSnapshot(data, snapshot)
-
 			kv.Log(LogInfo, "Saved raft state and snapshot")
 		}
 		time.Sleep(snapshotPollInterval)

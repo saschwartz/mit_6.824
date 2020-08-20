@@ -62,6 +62,19 @@ type LogEntry struct {
 	Command interface{}
 }
 
+// peristent state to encode and decode
+type PersistentState struct {
+	CurrentTerm int
+	VotedFor    int
+	Log         []LogEntry
+}
+
+// Snapshot is the persistent snapshot to encode and decode
+type Snapshot struct {
+	LastIncludedIndex int
+	LastIncludedTerm  int
+}
+
 // server state types and consts
 type serverState int
 
@@ -138,7 +151,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogWarning
+	SetLogLevel LogLevel = LogInfo
 )
 
 // GetState returns currentTerm and whether this server
@@ -160,9 +173,11 @@ func (rf *Raft) GetStateBytes(lock bool) []byte {
 	}
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
+	e.Encode(PersistentState{
+		CurrentTerm: rf.currentTerm,
+		VotedFor:    rf.votedFor,
+		Log:         rf.log,
+	})
 	return w.Bytes()
 }
 
@@ -197,17 +212,14 @@ func (rf *Raft) readPersist(data []byte) {
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	var currentTerm, votedFor int
-	var log []LogEntry
-	if d.Decode(&currentTerm) != nil ||
-		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+	var s PersistentState
+	if d.Decode(&s) != nil {
 		rf.Log(LogError, "Error reading persistent state.")
 	} else {
-		rf.currentTerm = currentTerm
-		rf.votedFor = votedFor
-		rf.log = log
-		rf.Log(LogDebug, "Reading persistent state on restart:", "\nrf.currentTerm:", rf.currentTerm, "\nrf.votedFor:", rf.votedFor, "\nrf.log", rf.log)
+		rf.currentTerm = s.CurrentTerm
+		rf.votedFor = s.VotedFor
+		rf.log = s.Log
+		rf.Log(LogDebug, "Read persistent state on restart:", "\nrf.currentTerm:", rf.currentTerm, "\nrf.votedFor:", rf.votedFor, "\nrf.log", rf.log)
 	}
 }
 
@@ -374,7 +386,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// leader's nextIndex is out of whack.
 	// trim log back accordingly
 	if args.PrevLogIndex >= 0 &&
-		(len(rf.log) < rf.getRaftLogIndex(args.PrevLogIndex) || rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
+		(len(rf.log) < args.PrevLogIndex || rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
 		// prev log is incorrect, need to roll back
 		reply.Success = false
 
@@ -806,15 +818,18 @@ func (rf *Raft) watchForSnapshot() {
 		data := rf.persister.ReadSnapshot()
 		r := bytes.NewBuffer(data)
 		d := labgob.NewDecoder(r)
-		var lastIncludedIndex, lastIncludedTerm int
-		if d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil {
-			rf.Log(LogError, "Error reading persistent snapshot.")
-		} else {
-			rf.Log(LogInfo, "New snapshot spotted.", "\n - lastIncludedIndex", lastIncludedIndex, "\n - lastIncludedTerm", lastIncludedTerm)
+		var s Snapshot
+		// only log error if we know we must have a snapshot present
+		// (i.e. we aren't waiting for the first one)
+		if e := d.Decode(&s); e != nil && rf.lastIncludedIndex != 0 {
+			rf.Log(LogError, "Error reading persistent snapshot.\n - error", e)
+		} else if s.LastIncludedIndex != rf.lastIncludedIndex {
+			// decode the snapshot and load relevant info into raft state
+			rf.Log(LogInfo, "New snapshot spotted", "\n - lastIncludedIndex", s.LastIncludedIndex, "\n - lastIncludedTerm", s.LastIncludedTerm)
 
 			rf.mu.Lock()
-			rf.lastIncludedIndex = lastIncludedIndex
-			rf.lastIncludedTerm = lastIncludedTerm
+			rf.lastIncludedIndex = s.LastIncludedIndex
+			rf.lastIncludedTerm = s.LastIncludedTerm
 			rf.mu.Unlock()
 		}
 	}
