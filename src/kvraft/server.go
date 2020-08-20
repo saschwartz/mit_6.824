@@ -298,8 +298,8 @@ func (kv *KVServer) ScanApplyCh() {
 
 func (kv *KVServer) snapshotWatch() {
 	for !kv.killed() {
-		if float64(kv.persister.RaftStateSize()) > float64(kv.maxraftstate)*maxStateThreshold {
-			kv.Log(LogDebug, "maxraftstate size exceeded, need to snapshot.")
+		if kv.maxraftstate > 0 && float64(kv.persister.RaftStateSize()) > float64(kv.maxraftstate)*maxStateThreshold {
+			kv.Log(LogWarning, "maxraftstate size exceeded, need to snapshot.", "\n - kv.persister.RaftStateSize()", kv.persister.RaftStateSize(), "\n - kv.maxraftstate*maxStateThreshold", float64(kv.maxraftstate)*maxStateThreshold)
 
 			// create snapshot bytes. we store the store, our latestResponse
 			// cache (for consistent duplicate detection across snapshots)
@@ -352,7 +352,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh, true)
 
 	// store our persister
 	kv.persister = persister
