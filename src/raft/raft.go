@@ -752,7 +752,7 @@ func (rf *Raft) heartbeatAppendEntries() {
 						rf.nextIndex[servIdx] = rf.lastIncludedIndex + 1
 						// TODO - need to actually send the InstallSnapshot RPC
 					} else {
-						rf.Log(LogWarning, "rf.nextIndex for server", servIdx, "rolled back to idx", rf.nextIndex[servIdx])
+						rf.Log(LogInfo, "rf.nextIndex for server", servIdx, "rolled back to idx", rf.nextIndex[servIdx])
 					}
 				}
 
