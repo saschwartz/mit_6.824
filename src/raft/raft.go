@@ -934,13 +934,14 @@ func (rf *Raft) watchForSnapshot() {
 		if e := d.Decode(&s); e != nil && rf.lastIncludedIndex != 0 {
 			rf.Log(LogError, "Error reading persistent snapshot.\n - error", e)
 		} else if s.LastIncludedIndex != rf.lastIncludedIndex {
-			// decode the snapshot and load relevant info into raft state
-			rf.Log(LogInfo, "New snapshot spotted", "\n - lastIncludedIndex", s.LastIncludedIndex, "\n - lastIncludedTerm", s.LastIncludedTerm)
-
+			// load relevant info into raft state and trim the log
 			rf.mu.Lock()
 			rf.lastIncludedIndex = s.LastIncludedIndex
 			rf.lastIncludedTerm = s.LastIncludedTerm
+			rf.log = rf.log[rf.getRaftLogIndex(rf.lastIncludedIndex)+1:]
 			rf.mu.Unlock()
+			rf.Log(LogInfo, "New snapshot loaded", "\n - lastIncludedIndex", s.LastIncludedIndex, "\n - lastIncludedTerm", s.LastIncludedTerm, "\n - rf.log", rf.log)
+
 		}
 		time.Sleep(defaultPollInterval)
 	}
