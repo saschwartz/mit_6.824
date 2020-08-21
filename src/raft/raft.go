@@ -125,7 +125,7 @@ type Raft struct {
 }
 
 // heartbeatSendInterval is How often do we send hearbeats
-const heartbeatSendInterval = time.Duration(50) * time.Millisecond
+const heartbeatSendInterval = time.Duration(100) * time.Millisecond
 
 // defaultPollInterval is how often to poll for election timeout, and the election parameters
 const defaultPollInterval = time.Duration(50) * time.Millisecond
@@ -155,7 +155,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogWarning
+	SetLogLevel LogLevel = LogDebug
 )
 
 // GetState returns currentTerm and whether this server
@@ -623,13 +623,16 @@ func GetRandomElectionTimeout() time.Duration {
 func (rf *Raft) heartbeatTimeoutCheck() {
 	// get heartbeat check start time
 	lastHeartbeatCheck := time.Now()
+	i := 0
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.electionTimeout > 0 && rf.state == Follower {
 			currentTime := time.Now()
 			rf.electionTimeout -= (currentTime.Sub(lastHeartbeatCheck))
 			lastHeartbeatCheck = currentTime
-			rf.Log(LogDebug, "timeout remaining:", rf.electionTimeout)
+			if i%10 == 0 { // decrease log density
+				rf.Log(LogDebug, "timeout remaining:", rf.electionTimeout)
+			}
 		} else if rf.state == Follower {
 			// election needs to occur
 			// quit this function and run the election
@@ -639,6 +642,7 @@ func (rf *Raft) heartbeatTimeoutCheck() {
 			return
 		}
 		rf.mu.Unlock()
+		i++
 		time.Sleep(defaultPollInterval)
 	}
 }
@@ -705,6 +709,7 @@ func (rf *Raft) heartbeatAppendEntries() {
 					// Note for 2 and 3 ... if leader does not have the relevant log
 					// entries, we need to call InstallSnapshot!
 					//
+					rf.Log(LogInfo, "Failed to AppendEntries to server", servIdx, "\n - IndexFirstConflictingTerm", replies[servIdx].IndexFirstConflictingTerm, "\n - ConflictingEntryTerm", replies[servIdx].ConflictingEntryTerm, "\n - LastLogIndex", replies[servIdx].LastLogIndex)
 					needInstallSnapshot := false
 					if replies[servIdx].ConflictingEntryTerm == -1 {
 						// case 1 - follower has no entry at the given location
@@ -724,15 +729,16 @@ func (rf *Raft) heartbeatAppendEntries() {
 						} else {
 							if rf.log[raftLogIdx].Term != replies[servIdx].ConflictingEntryTerm {
 								// case 2 - follower has a term not seen by leader
+								rf.Log(LogDebug, "Case 2: follower has a term not seen by leader")
 								rf.nextIndex[servIdx] = replies[servIdx].IndexFirstConflictingTerm
 							} else {
 								// case 3 - follower has a term seen by leader
 								// need to go to latest entry that leader has with this term
+								rf.Log(LogDebug, "Case 3: follower has a term seen by leader, finding leader's latest entry with this term \n - rf.log[", rf.log)
 								rf.nextIndex[servIdx] = replies[servIdx].IndexFirstConflictingTerm
 								for rf.log[rf.getRaftLogIndex(rf.nextIndex[servIdx])].Term == replies[servIdx].ConflictingEntryTerm {
 									rf.nextIndex[servIdx]++
 								}
-								rf.nextIndex[servIdx]++ // nextIndex is one AFTER the last matching term
 							}
 						}
 					}
@@ -746,7 +752,7 @@ func (rf *Raft) heartbeatAppendEntries() {
 						rf.nextIndex[servIdx] = rf.lastIncludedIndex + 1
 						// TODO - need to actually send the InstallSnapshot RPC
 					} else {
-
+						rf.Log(LogWarning, "rf.nextIndex for server", servIdx, "rolled back to idx", rf.nextIndex[servIdx])
 					}
 				}
 
