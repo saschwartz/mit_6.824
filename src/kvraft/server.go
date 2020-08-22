@@ -14,6 +14,10 @@ import (
 	"../raft"
 )
 
+// how long to wait for an op to appear at an index
+// (it may never appear due to a server crashing)
+const waitForOpTimeout = time.Duration(5000) * time.Millisecond
+
 // to give raft time to actually delete logs between polling times
 const snapshotPollInterval = time.Duration(100) * time.Millisecond
 
@@ -80,8 +84,22 @@ type Snapshot struct {
 // to appear in the log at idx
 // it then returns true if this op was at the index, or false if
 // another op was at the index
-func (kv *KVServer) WaitForAppliedOp(idx int, clientID string, clientSerial int) bool {
+//
+// it will timeout after a certain duration and just return false
+//
+func (kv *KVServer) WaitForAppliedOp(idx int, clientID string, clientSerial int, timeout time.Duration) bool {
+	lastTimeoutCheck := time.Now()
 	for {
+
+		// check timeout
+		currentTime := time.Now()
+		timeout -= (currentTime.Sub(lastTimeoutCheck))
+		lastTimeoutCheck = currentTime
+		if timeout < 0 {
+			kv.Log(LogInfo, "Timed out while waiting for op from clientID", clientID, "clientSerial", clientSerial, "to appear at idx", idx)
+			return false
+		}
+
 		kv.mu.Lock()
 		if len(kv.appliedOpsLog) >= idx {
 			kv.mu.Unlock()
@@ -127,7 +145,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// we see op is committed and tell client success,
 	// or see something else got committed there and tell client
 	// ErrWrongLeader (so it will retry)
-	appliedOp := kv.WaitForAppliedOp(expectedIdx, args.ClientID, args.ClientSerial)
+	appliedOp := kv.WaitForAppliedOp(expectedIdx, args.ClientID, args.ClientSerial, waitForOpTimeout)
 	if appliedOp {
 		// we saw our operation. success!
 		kv.mu.Lock()
@@ -179,7 +197,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// we see op is committed and tell client success,
 	// or see something else got committed there and tell client
 	// ErrWrongLeader (so it will retry)
-	appliedOp := kv.WaitForAppliedOp(expectedIdx, args.ClientID, args.ClientSerial)
+	appliedOp := kv.WaitForAppliedOp(expectedIdx, args.ClientID, args.ClientSerial, waitForOpTimeout)
 	if appliedOp {
 		// we saw our operation. success!
 		kv.mu.Lock()

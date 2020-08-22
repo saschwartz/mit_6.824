@@ -355,7 +355,7 @@ type AppendEntriesReply struct {
 	IndexFirstConflictingTerm int // the index of the first entry that has term ConflictingEntryTerm
 
 	// so that leader can appropriately update MatchIndex
-	NewLogsAdded int
+	HighestLogIndexAdded int
 }
 
 // helper function - returns true if log contains an entry with PrevIndex, PrevTerm
@@ -490,8 +490,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 
-		// set new matchIndex
-		reply.NewLogsAdded = len(args.LogEntries)
+		// for setting new matchIndex
+		if len(args.LogEntries) > 0 {
+			reply.HighestLogIndexAdded = args.LogEntries[len(args.LogEntries)-1].Index
+		}
 	}
 
 	// length of the log stored on this server - used for walking backwards,
@@ -508,7 +510,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	data := rf.GetStateBytes(false)
 	rf.persister.SaveRaftState(data)
 
-	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderID, "term", args.LeaderTerm, "\n - args.LogEntries:", args.LogEntries, "\n - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n - rf.log", rf.log, "\n - rf.commitIndex", rf.commitIndex, "\n - args.PrevLogIndex", args.PrevLogIndex, "\n - args.PrevLogTerm", args.PrevLogTerm, "\n - reply.LastLogIndex", reply.LastLogIndex, "\n - reply.ConflictingEntryTerm", reply.ConflictingEntryTerm, "\n - reply.IndexFirstConflictingTerm", reply.IndexFirstConflictingTerm, "\n - reply.NewLogsAdded", reply.NewLogsAdded, "\n - success:", reply.Success)
+	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderID, "term", args.LeaderTerm, "\n - args.LogEntries:", args.LogEntries, "\n - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n - rf.log", rf.log, "\n - rf.commitIndex", rf.commitIndex, "\n - args.PrevLogIndex", args.PrevLogIndex, "\n - args.PrevLogTerm", args.PrevLogTerm, "\n - reply.LastLogIndex", reply.LastLogIndex, "\n - reply.ConflictingEntryTerm", reply.ConflictingEntryTerm, "\n - reply.IndexFirstConflictingTerm", reply.IndexFirstConflictingTerm, "\n - reply.HighestLogIndexAdded", reply.HighestLogIndexAdded, "\n - success:", reply.Success)
 	return
 }
 
@@ -675,7 +677,9 @@ func (rf *Raft) heartbeatAppendEntries() {
 
 				// successful request - update matchindex and nextindex accordingly
 				if replies[servIdx].Success {
-					rf.matchIndex[servIdx] += replies[servIdx].NewLogsAdded
+					if replies[servIdx].HighestLogIndexAdded > 0 {
+						rf.matchIndex[servIdx] = replies[servIdx].HighestLogIndexAdded
+					}
 					rf.nextIndex[servIdx] = rf.matchIndex[servIdx] + 1
 
 					// failed request - check for better term or decrease nextIndex
@@ -749,12 +753,11 @@ func (rf *Raft) heartbeatAppendEntries() {
 						// resetting nextIndex
 						rf.nextIndex[servIdx] = rf.lastIncludedIndex + 1
 						// TODO - need to actually send the InstallSnapshot RPC
-					} else {
-						rf.Log(LogInfo, "rf.nextIndex for server", servIdx, "rolled back to idx", rf.nextIndex[servIdx])
 					}
 				}
 
 				// send a new append entries request to the server if the last one has finished
+				rf.Log(LogDebug, "rf.nextIndex for server", servIdx, "set to idx", rf.nextIndex[servIdx])
 				entries := []LogEntry{}
 				if len(rf.log) > 0 {
 					entries = rf.log[rf.getRaftLogIndex(rf.nextIndex[servIdx]):]
