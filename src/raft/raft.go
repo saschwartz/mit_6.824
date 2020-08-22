@@ -133,11 +133,11 @@ const defaultPollInterval = time.Duration(50) * time.Millisecond
 
 // minElectionTimeout gives the lower bound on the randomly generated
 // election timeout window in ms
-const minElectionTimeout = 500
+const minElectionTimeout = 1000
 
 // maxElectionTimeout gives the upper bound on the randomly generated
 // election timeout window in ms
-const maxElectionTimeout = 2500
+const maxElectionTimeout = 3000
 
 // LogLevel state types and consts
 type LogLevel int
@@ -156,7 +156,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogDebug
+	SetLogLevel LogLevel = LogWarning
 )
 
 // GetState returns currentTerm and whether this server
@@ -191,7 +191,7 @@ func (rf *Raft) GetStateBytes(lock bool) []byte {
 // return -1 if log is empty or log with this index precedes the log
 // if it exceeds the log, still return the expected index
 // can only call this when lock is already acquired!
-func (rf *Raft) GetRaftLogIndex(idx int) int {
+func (rf *Raft) getTrimmedLogIndex(idx int) int {
 	if len(rf.log) == 0 {
 		return -1
 	}
@@ -367,7 +367,7 @@ func (rf *Raft) correctPrevLogEntry(PrevLogIndex int, PrevLogTerm int) bool {
 	if PrevLogIndex == rf.lastIncludedIndex && PrevLogTerm == rf.lastIncludedTerm {
 		return true
 	}
-	prevRaftLogIndex := rf.GetRaftLogIndex(PrevLogIndex)
+	prevRaftLogIndex := rf.getTrimmedLogIndex(PrevLogIndex)
 	// the leader nextIndex is ahead of us
 	if prevRaftLogIndex >= len(rf.log) {
 		return false
@@ -423,7 +423,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// mismatch on prevlogindex/term - leader's nextIndex is out of whack.
 	// will need to trim log back accordingly - set the necessary reply variables
-	if args.PrevLogIndex > 0 && (len(rf.log) == 0 || !rf.correctPrevLogEntry(args.PrevLogIndex, args.PrevLogTerm)) {
+	if args.PrevLogIndex > 0 && !rf.correctPrevLogEntry(args.PrevLogIndex, args.PrevLogTerm) {
 		// prev log is incorrect, need to roll back
 		reply.Success = false
 
@@ -437,12 +437,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// we use the highest indexed log to roll back instead
 		reply.ConflictingEntryTerm = -1
 		reply.IndexFirstConflictingTerm = -1
-		prevRaftLogIndex := rf.GetRaftLogIndex(args.PrevLogIndex)
+		prevRaftLogIndex := rf.getTrimmedLogIndex(args.PrevLogIndex)
 		if len(rf.log) > 0 && prevRaftLogIndex < len(rf.log) {
 			reply.ConflictingEntryTerm = rf.log[prevRaftLogIndex].Term
 			reply.IndexFirstConflictingTerm = args.PrevLogIndex
 			for reply.IndexFirstConflictingTerm-1 > rf.log[0].Index &&
-				rf.log[rf.GetRaftLogIndex(reply.IndexFirstConflictingTerm)-1].Term == rf.log[rf.GetRaftLogIndex(reply.IndexFirstConflictingTerm)].Term {
+				rf.log[rf.getTrimmedLogIndex(reply.IndexFirstConflictingTerm)-1].Term == rf.log[rf.getTrimmedLogIndex(reply.IndexFirstConflictingTerm)].Term {
 				reply.IndexFirstConflictingTerm--
 			}
 		}
@@ -453,7 +453,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// delete any conflicting log entries and append new ones
 		for _, e := range args.LogEntries {
 			// if a clash, need to remove all entries from this point onwards inclusive
-			raftLogIdx := rf.GetRaftLogIndex(e.Index)
+			raftLogIdx := rf.getTrimmedLogIndex(e.Index)
 			if raftLogIdx > 0 && raftLogIdx < len(rf.log) && rf.log[raftLogIdx].Term != e.Term {
 				rf.log = rf.log[:raftLogIdx]
 			}
@@ -477,14 +477,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			idx := rf.commitIndex + 1
 			for idx <= args.LeaderCommitIndex &&
 				(len(args.LogEntries) == 0 || idx <= args.LogEntries[len(args.LogEntries)-1].Index) {
-				rf.Log(LogInfo, "Sending applyCh confirmation for commit of ", rf.log[rf.GetRaftLogIndex(idx)], "at index", idx)
-				rf.applyCh <- ApplyMsg{
-					CommandValid: true,
-					CommandIndex: idx,
-					CommandTerm:  rf.currentTerm,
-					Command:      rf.log[rf.GetRaftLogIndex(idx)].Command,
+				if rf.getTrimmedLogIndex(idx) != -1 { // have to check in case of InstallSnapshot
+					rf.Log(LogInfo, "Sending applyCh confirmation for commit of ", rf.log[rf.getTrimmedLogIndex(idx)], "at index", idx)
+					rf.applyCh <- ApplyMsg{
+						CommandValid: true,
+						CommandIndex: idx,
+						CommandTerm:  rf.currentTerm,
+						Command:      rf.log[rf.getTrimmedLogIndex(idx)].Command,
+					}
 				}
-
 				// increment and update commit idx
 				rf.commitIndex = idx
 				idx++
@@ -532,7 +533,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	// if we have a nonzero PrevLogIndex (i.e. the condition above just set it),
 	// retrieve it either from our log or our snapshot
 	if args.PrevLogIndex > 0 {
-		raftLogIdx := rf.GetRaftLogIndex(args.PrevLogIndex)
+		raftLogIdx := rf.getTrimmedLogIndex(args.PrevLogIndex)
 		if raftLogIdx == -1 {
 			rf.Log(LogDebug, "AppendEntries retrieving PrevLogTerm from snapshot since index", args.PrevLogIndex, "not present in log")
 			args.PrevLogTerm = rf.lastIncludedTerm
@@ -754,7 +755,7 @@ func (rf *Raft) heartbeatAppendEntries() {
 					} else {
 						// if not case 1, need to check we have the logs at and beyond
 						// IndexFirstConflictingTerm
-						raftLogIdx := rf.GetRaftLogIndex(replies[servIdx].IndexFirstConflictingTerm)
+						raftLogIdx := rf.getTrimmedLogIndex(replies[servIdx].IndexFirstConflictingTerm)
 						if raftLogIdx == -1 {
 							// don't have the logs we need - will need to snapshot
 							// set nextIndex to the lastIncludedIndex to force this
@@ -769,7 +770,7 @@ func (rf *Raft) heartbeatAppendEntries() {
 								// need to go to latest entry that leader has with this term
 								rf.Log(LogDebug, "Case 3: follower has a term seen by leader, finding leader's latest entry with this term \n - rf.log[", rf.log)
 								rf.nextIndex[servIdx] = replies[servIdx].IndexFirstConflictingTerm
-								for rf.log[rf.GetRaftLogIndex(rf.nextIndex[servIdx])].Term == replies[servIdx].ConflictingEntryTerm {
+								for rf.log[rf.getTrimmedLogIndex(rf.nextIndex[servIdx])].Term == replies[servIdx].ConflictingEntryTerm {
 									rf.nextIndex[servIdx]++
 								}
 							}
@@ -799,7 +800,7 @@ func (rf *Raft) heartbeatAppendEntries() {
 				rf.Log(LogDebug, "rf.nextIndex for server", servIdx, "set to idx", rf.nextIndex[servIdx], "\n - rf.log", rf.log, "\n - rf.lastIncludedIndex", rf.lastIncludedIndex, "\n - rf.lastIncludedTerm", rf.lastIncludedTerm)
 				entries := []LogEntry{}
 				if len(rf.log) > 0 {
-					entries = rf.log[rf.GetRaftLogIndex(rf.nextIndex[servIdx]):]
+					entries = rf.log[rf.getTrimmedLogIndex(rf.nextIndex[servIdx]):]
 				}
 				args := &AppendEntriesArgs{
 					LeaderTerm:        rf.currentTerm,
@@ -825,7 +826,7 @@ func (rf *Raft) heartbeatAppendEntries() {
 		// update commit index
 		origIndex := rf.commitIndex
 		newIdx := rf.commitIndex + 1
-		for newIdx <= len(rf.log) {
+		for len(rf.log) > 0 && newIdx <= rf.log[len(rf.log)-1].Index {
 			replicas := 1 // already replicated in our log
 			for servIdx := range rf.peers {
 				if servIdx != rf.me && rf.matchIndex[servIdx] >= newIdx {
@@ -833,9 +834,9 @@ func (rf *Raft) heartbeatAppendEntries() {
 				}
 			}
 			if replicas >= int(math.Ceil(float64(len(rf.peers))/2.0)) &&
-				rf.log[rf.GetRaftLogIndex(newIdx)].Term == rf.currentTerm {
+				rf.log[rf.getTrimmedLogIndex(newIdx)].Term == rf.currentTerm {
 				rf.commitIndex = newIdx
-				rf.Log(LogInfo, "Entry ", rf.log[rf.GetRaftLogIndex(rf.commitIndex)], "replicated on a majority of servers. Committed to index", rf.commitIndex)
+				rf.Log(LogInfo, "Entry ", rf.log[rf.getTrimmedLogIndex(rf.commitIndex)], "replicated on a majority of servers. Committed to index", rf.commitIndex)
 			}
 			newIdx++
 		}
@@ -843,12 +844,12 @@ func (rf *Raft) heartbeatAppendEntries() {
 		// send messages to applyCh for every message that was committed
 		for origIndex < rf.commitIndex {
 			origIndex++
-			rf.Log(LogInfo, "Sending applyCh confirmation for commit of ", rf.log[rf.GetRaftLogIndex(origIndex)], "at index", origIndex)
+			rf.Log(LogInfo, "Sending applyCh confirmation for commit of ", rf.log[rf.getTrimmedLogIndex(origIndex)], "at index", origIndex)
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				CommandIndex: origIndex,
 				CommandTerm:  rf.currentTerm,
-				Command:      rf.log[rf.GetRaftLogIndex(origIndex)].Command,
+				Command:      rf.log[rf.getTrimmedLogIndex(origIndex)].Command,
 			}
 		}
 
@@ -891,8 +892,8 @@ func (rf *Raft) runElection() {
 
 			// grab last log index and term - default to snapshot if log is []
 			if len(rf.log) > 0 {
-				args.LastLogIndex = len(rf.log)
-				args.LastLogTerm = rf.log[args.LastLogIndex-1].Term
+				args.LastLogIndex = rf.log[len(rf.log)-1].Index
+				args.LastLogTerm = rf.log[len(rf.log)-1].Term
 			} else {
 				args.LastLogIndex = rf.lastIncludedIndex
 				args.LastLogTerm = rf.lastIncludedTerm
@@ -901,7 +902,7 @@ func (rf *Raft) runElection() {
 			// to prevent partial data (unsure if this can happen but seems like a good idea)
 			go func(servIdx int) {
 				reply := &RequestVoteReply{}
-				rf.Log(LogDebug, "Sending AppendEntries to servIdx", servIdx)
+				rf.Log(LogDebug, "Sending RequestVote to servIdx", servIdx)
 				ok := rf.sendRequestVote(servIdx, args, reply)
 				if ok {
 					rf.Log(LogDebug, "Received RequestVote reply from server", servIdx, "\n - reply", reply)
@@ -997,7 +998,18 @@ func (rf *Raft) watchForSnapshot() {
 			rf.mu.Lock()
 			rf.lastIncludedIndex = snapshot.LastIncludedIndex
 			rf.lastIncludedTerm = snapshot.LastIncludedTerm
-			rf.log = rf.log[rf.GetRaftLogIndex(rf.lastIncludedIndex)+1:]
+
+			// we may or may not actually have the logs to trim
+			// if we don't, this is probably the result of an installsnapshot
+			// RPC, in which case we want a blank log
+			trimIdx := rf.getTrimmedLogIndex(rf.lastIncludedIndex)
+			if trimIdx < len(rf.log) {
+				rf.log = rf.log[trimIdx+1:]
+			} else {
+				rf.log = []LogEntry{}
+			}
+
+			rf.Log(LogInfo, "New Snapshot loaded.\n - LastIncludedIndex", snapshot.LastIncludedIndex, "\n - LastIncludedTerm", snapshot.LastIncludedTerm, "\n - rf.log", rf.log)
 			rf.mu.Unlock()
 		}
 		time.Sleep(defaultPollInterval)
@@ -1071,7 +1083,13 @@ func (rf *Raft) Log(level LogLevel, a ...interface{}) {
 		pc, _, ln, _ := runtime.Caller(1)
 		rp := regexp.MustCompile(".+\\.([a-zA-Z]+)")
 		funcName := rp.FindStringSubmatch(runtime.FuncForPC(pc).Name())[1]
-		data := append([]interface{}{level, "[ Server", rf.me, "- term", rf.currentTerm, "]", "[", funcName, ln, "]"}, a...)
+		st := "F"
+		if rf.state == Leader {
+			st = "L"
+		} else if rf.state == Candidate {
+			st = "C"
+		}
+		data := append([]interface{}{level, "[ Server", rf.me, "- term", rf.currentTerm, st, "]", "[", funcName, ln, "]"}, a...)
 		fmt.Println(data...)
 	}
 }
