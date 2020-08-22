@@ -289,9 +289,31 @@ func (kv *KVServer) ScanApplyCh() {
 		msg := <-kv.applyCh
 		kv.Log(LogDebug, "Received commit on applyCh:", msg)
 
-		op, ok := msg.Command.(Op)
-		if !ok {
-			// might find a no-op - just log it, add it to log and keep looping
+		// see what type of message is is and respond accordingly
+		if op, ok := msg.Command.(Op); ok {
+			// message is an applyable op. Apply it to kv state
+			// ensure to cache response to prevent re-applications later on!
+			appliedOp := kv.ApplyOp(op, msg.CommandIndex, msg.CommandTerm)
+			kv.mu.Lock()
+			kv.appliedOpsLog = append(kv.appliedOpsLog, appliedOp)
+			kv.latestResponse[appliedOp.KVOp.ClientID] = kv.appliedOpsLog[appliedOp.Index-1]
+			kv.mu.Unlock()
+			kv.Log(LogDebug, "Committed ops log extended:", kv.appliedOpsLog)
+		} else if len(msg.Snapshot) > 0 {
+			r := bytes.NewBuffer(msg.Snapshot)
+			d := labgob.NewDecoder(r)
+			var s Snapshot
+			if e := d.Decode(&s); e != nil {
+				kv.Log(LogError, "Saw an applyMsg with Snapshot but error reading it.\n - error", e)
+			} else {
+				kv.Log(LogInfo, "InstallSnapshot found on applyMsg Ch, update initiated.\n - LastIncludedIndex", s.LastIncludedIndex, "\n - LastIncludedTerm", s.LastIncludedTerm, "\n - Store", s.Store, "\n - LatestResponse", s.LatestResponse)
+				kv.mu.Lock()
+				kv.store = s.Store
+				kv.latestResponse = s.LatestResponse
+				kv.mu.Unlock()
+			}
+		} else {
+			// must be a no-op - just log it, add it to log and keep looping
 			kv.Log(LogDebug, "Saw a no-op - skipping state machine update and waiting for next message.")
 			kv.mu.Lock()
 			kv.appliedOpsLog = append(kv.appliedOpsLog, KVAppliedOp{
@@ -299,18 +321,7 @@ func (kv *KVServer) ScanApplyCh() {
 				KVOp:  Op{OpType: "no-op"},
 			})
 			kv.mu.Unlock()
-			continue
 		}
-
-		// if a valid op, apply op to state and add to log
-		// ensure to cache response to prevent re-applications later on!
-		appliedOp := kv.ApplyOp(op, msg.CommandIndex, msg.CommandTerm)
-		kv.mu.Lock()
-		kv.appliedOpsLog = append(kv.appliedOpsLog, appliedOp)
-		kv.latestResponse[appliedOp.KVOp.ClientID] = kv.appliedOpsLog[appliedOp.Index-1]
-		kv.mu.Unlock()
-
-		kv.Log(LogDebug, "Committed ops log extended:", kv.appliedOpsLog)
 	}
 }
 
@@ -328,19 +339,32 @@ func (kv *KVServer) snapshotWatch() {
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)
 
-			e.Encode(Snapshot{
+			snapshot := Snapshot{
 				LastIncludedIndex: len(kv.appliedOpsLog),
 				LastIncludedTerm:  kv.appliedOpsLog[len(kv.appliedOpsLog)-1].Term,
 				Store:             kv.store,
 				LatestResponse:    kv.latestResponse,
-			})
-			snapshot := w.Bytes()
+			}
+			e.Encode(snapshot)
+			snapshotBytes := w.Bytes()
 			kv.mu.Unlock()
 
-			// save state and snapshot
+			// fetch our state and trim raft logs, then save both snapshot and state
 			data := kv.rf.GetStateBytes(true)
-			kv.persister.SaveStateAndSnapshot(data, snapshot)
-			kv.Log(LogInfo, "Saved raft state and snapshot")
+			r := bytes.NewBuffer(data)
+			d := labgob.NewDecoder(r)
+			var state raft.PersistentState
+			if e := d.Decode(&state); e != nil {
+				kv.Log(LogError, "Error reading persistent state.\n - error", e)
+			} else {
+				state.Log = state.Log[kv.rf.GetRaftLogIndex(snapshot.LastIncludedIndex)+1:]
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+				e.Encode(state)
+				kv.persister.SaveStateAndSnapshot(w.Bytes(), snapshotBytes)
+
+				kv.Log(LogInfo, "Saved raft state and snapshot", "\n - lastIncludedIndex", snapshot.LastIncludedIndex, "\n - lastIncludedTerm", snapshot.LastIncludedTerm, "\n - state.log", state.Log, "\n - kv.persister.RaftStateSize()", kv.persister.RaftStateSize())
+			}
 		}
 		time.Sleep(snapshotPollInterval)
 	}
