@@ -155,7 +155,7 @@ func (me LogLevel) String() string {
 
 // SetLogLevel sets the level we log at
 const (
-	SetLogLevel LogLevel = LogWarning
+	SetLogLevel LogLevel = LogDebug
 )
 
 // GetState returns currentTerm and whether this server
@@ -277,7 +277,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 	}
 
-	rf.Log(LogDebug, "Received RequestVote from server", args.CandidateID, "term", args.CandidateTerm, "\n  - args.LastLogIndex", args.LastLogIndex, "\n  - args.lastLogTerm", args.LastLogTerm, "\n  - rf.log", rf.log, "\n  - rf.votedFor", rf.votedFor, "\n  - VoteGranted:", reply.VoteGranted)
+	rf.Log(LogDebug, "Received RequestVote from server", args.CandidateID, "term", args.CandidateTerm, "\n - args.LastLogIndex", args.LastLogIndex, "\n - args.lastLogTerm", args.LastLogTerm, "\n - rf.log", rf.log, "\n - rf.votedFor", rf.votedFor, "\n - VoteGranted:", reply.VoteGranted)
 
 	// update currentTerm and state if candidate has higher term
 	// if we found out we're no longer a leader, restart the heartbeat timeout check
@@ -508,7 +508,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	data := rf.GetStateBytes(false)
 	rf.persister.SaveRaftState(data)
 
-	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderID, "term", args.LeaderTerm, "\n  - args.LogEntries:", args.LogEntries, "\n  - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n  - rf.log", rf.log, "\n  - rf.commitIndex", rf.commitIndex, "\n  - args.PrevLogIndex", args.PrevLogIndex, "\n  - args.PrevLogTerm", args.PrevLogTerm, "\n  - reply.LastLogIndex", reply.LastLogIndex, "\n  - reply.ConflictingEntryTerm", reply.ConflictingEntryTerm, "\n  - reply.IndexFirstConflictingTerm", reply.IndexFirstConflictingTerm, "\n  - success:", reply.Success)
+	rf.Log(LogDebug, "Received AppendEntries from server", args.LeaderID, "term", args.LeaderTerm, "\n - args.LogEntries:", args.LogEntries, "\n - args.LeaderCommitIndex", args.LeaderCommitIndex, "\n - rf.log", rf.log, "\n - rf.commitIndex", rf.commitIndex, "\n - args.PrevLogIndex", args.PrevLogIndex, "\n - args.PrevLogTerm", args.PrevLogTerm, "\n - reply.LastLogIndex", reply.LastLogIndex, "\n - reply.ConflictingEntryTerm", reply.ConflictingEntryTerm, "\n - reply.IndexFirstConflictingTerm", reply.IndexFirstConflictingTerm, "\n - reply.NewLogsAdded", reply.NewLogsAdded, "\n - success:", reply.Success)
 	return
 }
 
@@ -568,9 +568,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// new index is set based on past snapshot and current log
 	idx := 1
-	if len(rf.log) == 0 && rf.lastIncludedIndex > 0 {
+	if len(rf.log) == 0 {
 		idx = rf.lastIncludedIndex + 1
-	} else if len(rf.log) > 0 {
+	} else {
 		idx = rf.log[len(rf.log)-1].Index + 1
 	}
 
@@ -581,7 +581,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, entry)
-	rf.Log(LogDebug, "Start called, current log:", rf.log, "\n  - rf.matchIndex: ", rf.matchIndex)
+	rf.Log(LogDebug, "Start called, current log:", rf.log, "\n - rf.matchIndex: ", rf.matchIndex)
 
 	// persist - we may have changed rf.log
 	data := rf.GetStateBytes(false)
@@ -655,7 +655,7 @@ func (rf *Raft) heartbeatTimeoutCheck() {
 // The requests are send on a heartbeat interval
 func (rf *Raft) heartbeatAppendEntries() {
 	// make server -> reply map
-	replies := make(map[int]*AppendEntriesReply)
+	replies := make([]*AppendEntriesReply, len(rf.peers))
 	for servIdx := range rf.peers {
 		replies[servIdx] = &AppendEntriesReply{}
 	}
@@ -675,10 +675,8 @@ func (rf *Raft) heartbeatAppendEntries() {
 
 				// successful request - update matchindex and nextindex accordingly
 				if replies[servIdx].Success {
-					if replies[servIdx].Success {
-						rf.matchIndex[servIdx] += replies[servIdx].NewLogsAdded
-						rf.nextIndex[servIdx] = rf.matchIndex[servIdx] + 1
-					}
+					rf.matchIndex[servIdx] += replies[servIdx].NewLogsAdded
+					rf.nextIndex[servIdx] = rf.matchIndex[servIdx] + 1
 
 					// failed request - check for better term or decrease nextIndex
 				} else if !replies[servIdx].Success && replies[servIdx].Returned {
@@ -757,7 +755,6 @@ func (rf *Raft) heartbeatAppendEntries() {
 				}
 
 				// send a new append entries request to the server if the last one has finished
-				replies[servIdx] = &AppendEntriesReply{}
 				entries := []LogEntry{}
 				if len(rf.log) > 0 {
 					entries = rf.log[rf.getRaftLogIndex(rf.nextIndex[servIdx]):]
@@ -767,7 +764,18 @@ func (rf *Raft) heartbeatAppendEntries() {
 					LeaderCommitIndex: rf.commitIndex,
 					LogEntries:        entries,
 				}
-				go rf.sendAppendEntries(servIdx, args, replies[servIdx])
+
+				// only place the reply into replies, when the RPC completes,
+				// to prevent partial data (unsure if this can happen but seems like a good idea)
+				go func(servIdx int) {
+					rf.Log(LogDebug, "sendAppendEntries to servIdx", servIdx)
+					reply := &AppendEntriesReply{}
+					ok := rf.sendAppendEntries(servIdx, args, reply)
+					if ok {
+						rf.Log(LogDebug, "Received AppendEntries reply from server", servIdx, "\n - reply", reply)
+						replies[servIdx] = reply
+					}
+				}(servIdx)
 			}
 		}
 
@@ -827,8 +835,10 @@ func (rf *Raft) runElection() {
 	rf.electionTimeout = GetRandomElectionTimeout()
 
 	// for holding replies - we send out the requests concurrently
-	peers := rf.peers
-	replies := make([]*RequestVoteReply, len(peers))
+	replies := make([]*RequestVoteReply, len(rf.peers))
+	for servIdx := range rf.peers {
+		replies[servIdx] = &RequestVoteReply{}
+	}
 
 	// send out requests concurrently
 	for servIdx := range rf.peers {
@@ -836,9 +846,6 @@ func (rf *Raft) runElection() {
 			args := &RequestVoteArgs{
 				CandidateTerm: rf.currentTerm,
 			}
-			reply := &RequestVoteReply{}
-			replies[servIdx] = reply
-			rf.Log(LogDebug, "Sending RequestVote to server", servIdx)
 
 			// grab last log index and term - default to snapshot if log is []
 			if len(rf.log) > 0 {
@@ -848,7 +855,17 @@ func (rf *Raft) runElection() {
 				args.LastLogIndex = rf.lastIncludedIndex
 				args.LastLogTerm = rf.lastIncludedTerm
 			}
-			go rf.sendRequestVote(servIdx, args, reply)
+			// only place the reply into replies, when the RPC completes,
+			// to prevent partial data (unsure if this can happen but seems like a good idea)
+			go func(servIdx int) {
+				reply := &RequestVoteReply{}
+				rf.Log(LogDebug, "Sending AppendEntries to servIdx", servIdx)
+				ok := rf.sendRequestVote(servIdx, args, reply)
+				if ok {
+					rf.Log(LogDebug, "Received RequestVote reply from server", servIdx, "\n - reply", reply)
+					replies[servIdx] = reply
+				}
+			}(servIdx)
 		}
 	}
 	rf.mu.Unlock()
@@ -880,7 +897,7 @@ func (rf *Raft) runElection() {
 			// majority vote achieved - set state as leader and
 			// start sending heartbeats
 			if votes >= int(math.Ceil(float64(len(rf.peers))/2.0)) {
-				rf.Log(LogInfo, "elected leader", "\n  - rf.log:", rf.log, "\n  - rf.commitIndex", rf.commitIndex)
+				rf.Log(LogInfo, "elected leader", "\n - rf.log:", rf.log, "\n - rf.commitIndex", rf.commitIndex)
 				rf.state = Leader
 
 				// get next index of the log for rf.nextIndex
