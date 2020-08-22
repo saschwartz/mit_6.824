@@ -381,7 +381,7 @@ func (rf *Raft) correctPrevLogEntry(PrevLogIndex int, PrevLogTerm int) bool {
 	// including all committed entries.
 	// However, our snapshot includes AT MOST all committed entries,
 	// so nextIndex should never precede it.
-	if prevRaftLogIndex == -1 {
+	if prevRaftLogIndex == -1 && len(rf.log) > 0 {
 		rf.Log(LogError, "AppendEntries call has PrevLogIndex preceding our log!")
 		return false
 	}

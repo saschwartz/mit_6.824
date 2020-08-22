@@ -368,7 +368,7 @@ func (kv *KVServer) snapshotWatch() {
 		if kv.maxraftstate > 0 &&
 			float64(kv.persister.RaftStateSize()) > float64(kv.maxraftstate)*maxStateThreshold &&
 			kv.appliedOpsLog[len(kv.appliedOpsLog)-1].Index > kv.lastIncludedIndex {
-			kv.Log(LogWarning, "maxraftstate size exceeded, need to snapshot.", "\n - kv.persister.RaftStateSize()", kv.persister.RaftStateSize(), "\n - kv.maxraftstate*maxStateThreshold", float64(kv.maxraftstate)*maxStateThreshold, "\n - kv.lastIncludedIndex", kv.lastIncludedIndex)
+			kv.Log(LogInfo, "maxraftstate size exceeded, need to snapshot.", "\n - kv.persister.RaftStateSize()", kv.persister.RaftStateSize(), "\n - kv.maxraftstate*maxStateThreshold", float64(kv.maxraftstate)*maxStateThreshold, "\n - kv.lastIncludedIndex", kv.lastIncludedIndex)
 
 			// create snapshot bytes. we store the store, our latestResponse
 			// cache (for consistent duplicate detection across snapshots)
