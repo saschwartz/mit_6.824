@@ -784,7 +784,7 @@ func (rf *Raft) heartbeatAppendEntries() {
 				// and it will fail until the snapshot is installed, and we will just keep
 				// resetting nextIndex
 				if rf.nextIndex[servIdx] <= rf.lastIncludedIndex {
-					rf.Log(LogWarning, "Failed to AppendEntries to server", servIdx, "- need to send InstallSnapshot!")
+					rf.Log(LogInfo, "Failed to AppendEntries to server", servIdx, "- need to send InstallSnapshot!")
 					rf.nextIndex[servIdx] = rf.lastIncludedIndex + 1
 
 					// actually call the RPC
