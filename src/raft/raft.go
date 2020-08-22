@@ -363,9 +363,9 @@ type AppendEntriesReply struct {
 // OR if the most recent snapshot LastIndex, LastTerm matches
 // must only be called if lock is already held!
 func (rf *Raft) correctPrevLogEntry(PrevLogIndex int, PrevLogTerm int) bool {
-	// we have a snapshot where the last included log is this entry
-	if PrevLogIndex == rf.lastIncludedIndex && PrevLogTerm == rf.lastIncludedTerm {
-		return true
+	// if no log, have to check lastIncludedIndex and lastIncludedTerm
+	if len(rf.log) == 0 {
+		return PrevLogIndex == rf.lastIncludedIndex && PrevLogTerm == rf.lastIncludedTerm
 	}
 	prevRaftLogIndex := rf.getTrimmedLogIndex(PrevLogIndex)
 	// the leader nextIndex is ahead of us
@@ -382,8 +382,8 @@ func (rf *Raft) correctPrevLogEntry(PrevLogIndex int, PrevLogTerm int) bool {
 	// However, our snapshot includes AT MOST all committed entries,
 	// so nextIndex should never precede it.
 	if prevRaftLogIndex == -1 && len(rf.log) > 0 {
-		rf.Log(LogError, "AppendEntries call has PrevLogIndex preceding our log!")
-		return false
+		rf.Log(LogInfo, "AppendEntries call has PrevLogIndex preceding our log!")
+		return true
 	}
 
 	// we must have an entry at the given index (see above note for why
@@ -834,6 +834,7 @@ func (rf *Raft) heartbeatAppendEntries() {
 				}
 			}
 			if replicas >= int(math.Ceil(float64(len(rf.peers))/2.0)) &&
+				newIdx > rf.lastIncludedIndex &&
 				rf.log[rf.getTrimmedLogIndex(newIdx)].Term == rf.currentTerm {
 				rf.commitIndex = newIdx
 				rf.Log(LogInfo, "Entry ", rf.log[rf.getTrimmedLogIndex(rf.commitIndex)], "replicated on a majority of servers. Committed to index", rf.commitIndex)
@@ -845,11 +846,13 @@ func (rf *Raft) heartbeatAppendEntries() {
 		for origIndex < rf.commitIndex {
 			origIndex++
 			rf.Log(LogInfo, "Sending applyCh confirmation for commit of ", rf.log[rf.getTrimmedLogIndex(origIndex)], "at index", origIndex)
-			rf.applyCh <- ApplyMsg{
-				CommandValid: true,
-				CommandIndex: origIndex,
-				CommandTerm:  rf.currentTerm,
-				Command:      rf.log[rf.getTrimmedLogIndex(origIndex)].Command,
+			if rf.getTrimmedLogIndex(origIndex) >= 0 {
+				rf.applyCh <- ApplyMsg{
+					CommandValid: true,
+					CommandIndex: origIndex,
+					CommandTerm:  rf.currentTerm,
+					Command:      rf.log[rf.getTrimmedLogIndex(origIndex)].Command,
+				}
 			}
 		}
 

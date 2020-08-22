@@ -367,6 +367,7 @@ func (kv *KVServer) snapshotWatch() {
 		// we have additional ops to commit
 		if kv.maxraftstate > 0 &&
 			float64(kv.persister.RaftStateSize()) > float64(kv.maxraftstate)*maxStateThreshold &&
+			len(kv.appliedOpsLog) > 0 &&
 			kv.appliedOpsLog[len(kv.appliedOpsLog)-1].Index > kv.lastIncludedIndex {
 			kv.Log(LogInfo, "maxraftstate size exceeded, need to snapshot.", "\n - kv.persister.RaftStateSize()", kv.persister.RaftStateSize(), "\n - kv.maxraftstate*maxStateThreshold", float64(kv.maxraftstate)*maxStateThreshold, "\n - kv.lastIncludedIndex", kv.lastIncludedIndex)
 
