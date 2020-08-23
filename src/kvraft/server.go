@@ -335,9 +335,6 @@ func (kv *KVServer) ScanApplyCh() {
 				}
 				kv.mu.Unlock()
 			}
-		} else {
-			// must be a no-op
-			kv.Log(LogDebug, "Saw a no-op - skipping state machine update and waiting for next message.")
 		}
 	}
 }
@@ -406,7 +403,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh, true)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// store our persister
 	kv.persister = persister

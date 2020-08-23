@@ -462,7 +462,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// append current entry if it is going to be at the end of the log, otherwise just overwrite
 			if len(rf.log) == 0 || raftLogIdx >= len(rf.log) {
 				rf.log = append(rf.log, e)
-			} else {
+			} else if raftLogIdx > -1 { // so we don't append entries that are behind
 				rf.log[raftLogIdx] = e
 			}
 		}
@@ -964,16 +964,6 @@ func (rf *Raft) runElection() {
 					}
 				}
 
-				// commit a "no-op" so that entries from previous terms eligible for
-				// commitment will be found and committed
-				if rf.noops {
-					rf.log = append(rf.log, LogEntry{
-						Index:   nextIdx,
-						Term:    rf.currentTerm,
-						Command: "no-op",
-					})
-				}
-
 				rf.mu.Unlock()
 				go rf.heartbeatAppendEntries()
 				return
@@ -1026,7 +1016,7 @@ func (rf *Raft) TrimLog(lastIncludedIndex int, lastIncludedTerm int) []byte {
 // for any long-running work.
 //
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg, options ...bool) *Raft {
+	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 
 	rf.mu.Lock()
@@ -1051,13 +1041,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// for passing info about commits
 	rf.applyCh = applyCh
-
-	// special - we turn on no-ops only for kvraft
-	// to help with the case where a new leader won't know to commit
-	// entries from previous terms
-	if len(options) > 0 {
-		rf.noops = options[0]
-	}
 
 	rf.mu.Unlock()
 
