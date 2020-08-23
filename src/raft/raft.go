@@ -105,10 +105,9 @@ type Raft struct {
 	lastApplied int        // index of highest log entry applied to state machine
 
 	// leader specific state
-	state              serverState
-	nextIndex          []int // next log index to send to each server
-	matchIndex         []int // for each server, index of highest log entry known to be replicated on that server
-	inAgreementProcess bool  // we are currently in the process of agreeing... helps avoid duplicate Start calls
+	state      serverState
+	nextIndex  []int // next log index to send to each server
+	matchIndex []int // for each server, index of highest log entry known to be replicated on that server
 
 	// election timeout for follower
 	electionTimeout time.Duration
@@ -178,11 +177,13 @@ func (rf *Raft) GetStateBytes(lock bool) []byte {
 	}
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(PersistentState{
+	p := PersistentState{
 		CurrentTerm: rf.currentTerm,
 		VotedFor:    rf.votedFor,
 		Log:         rf.log,
-	})
+	}
+	e.Encode(p)
+	rf.Log(LogDebug, "Retrieved state bytes\n - PersistentState", p)
 	return w.Bytes()
 }
 
@@ -835,9 +836,10 @@ func (rf *Raft) heartbeatAppendEntries() {
 			}
 			if replicas >= int(math.Ceil(float64(len(rf.peers))/2.0)) &&
 				newIdx > rf.lastIncludedIndex &&
+				rf.getTrimmedLogIndex(newIdx) >= 0 &&
 				rf.log[rf.getTrimmedLogIndex(newIdx)].Term == rf.currentTerm {
 				rf.commitIndex = newIdx
-				rf.Log(LogInfo, "Entry ", rf.log[rf.getTrimmedLogIndex(rf.commitIndex)], "replicated on a majority of servers. Committed to index", rf.commitIndex)
+				rf.Log(LogInfo, "Entry ", rf.log[rf.getTrimmedLogIndex(rf.commitIndex)], "replicated on a majority of servers. Commited to index", rf.commitIndex)
 			}
 			newIdx++
 		}
@@ -988,37 +990,27 @@ func (rf *Raft) runElection() {
 	}
 }
 
-func (rf *Raft) watchForSnapshot() {
-	for !rf.killed() {
-		snapshotData := rf.persister.ReadSnapshot()
-		r := bytes.NewBuffer(snapshotData)
-		d := labgob.NewDecoder(r)
-		var snapshot Snapshot
-		// only log error if we know we must have a snapshot present
-		// (i.e. we aren't waiting for the first one)
-		if e := d.Decode(&snapshot); e != nil && rf.lastIncludedIndex != 0 {
-			rf.Log(LogError, "Error reading persistent snapshot.\n - error", e)
-		} else if snapshot.LastIncludedIndex != rf.lastIncludedIndex {
-			// load relevant info into raft state and trim the log
-			rf.mu.Lock()
-			rf.lastIncludedIndex = snapshot.LastIncludedIndex
-			rf.lastIncludedTerm = snapshot.LastIncludedTerm
-
-			// we may or may not actually have the logs to trim
-			// if we don't, this is probably the result of an installsnapshot
-			// RPC, in which case we want a blank log
-			trimIdx := rf.getTrimmedLogIndex(rf.lastIncludedIndex)
-			if trimIdx < len(rf.log) {
-				rf.log = rf.log[trimIdx+1:]
-			} else {
-				rf.log = []LogEntry{}
-			}
-
-			rf.Log(LogInfo, "New Snapshot loaded.\n - LastIncludedIndex", snapshot.LastIncludedIndex, "\n - LastIncludedTerm", snapshot.LastIncludedTerm, "\n - rf.log", rf.log)
-			rf.mu.Unlock()
-		}
-		time.Sleep(defaultPollInterval)
+// TrimLog trims our raft log to only
+// hold entries from idx onwards
+//
+// we need this so the KV server can directly manage
+// our log adjustments on snapshot
+//
+// we return the persistent state bytes to be saved
+// so that the caller can do this atomically
+func (rf *Raft) TrimLog(lastIncludedIndex int, lastIncludedTerm int) []byte {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.lastIncludedIndex = lastIncludedIndex
+	rf.lastIncludedTerm = lastIncludedTerm
+	trimIdx := rf.getTrimmedLogIndex(rf.lastIncludedIndex)
+	if trimIdx < len(rf.log) {
+		rf.log = rf.log[trimIdx+1:]
+	} else {
+		rf.log = []LogEntry{}
 	}
+	rf.Log(LogInfo, "New Snapshot loaded.\n - LastIncludedIndex", lastIncludedIndex, "\n - LastIncludedTerm", lastIncludedTerm, "\n - rf.log", rf.log)
+	return rf.GetStateBytes(false)
 }
 
 // Make creates a raft server
@@ -1074,9 +1066,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start election timeout check - server can't be a leader when created
 	go rf.heartbeatTimeoutCheck()
-
-	// trim logs if a new snapshot appears
-	go rf.watchForSnapshot()
 
 	return rf
 }
