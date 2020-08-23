@@ -845,13 +845,15 @@ func (rf *Raft) heartbeatAppendEntries() {
 		// send messages to applyCh for every message that was committed
 		for origIndex < rf.commitIndex {
 			origIndex++
-			rf.Log(LogInfo, "Sending applyCh confirmation for commit of ", rf.log[rf.getTrimmedLogIndex(origIndex)], "at index", origIndex)
 			if rf.getTrimmedLogIndex(origIndex) >= 0 {
-				rf.applyCh <- ApplyMsg{
-					CommandValid: true,
-					CommandIndex: origIndex,
-					CommandTerm:  rf.currentTerm,
-					Command:      rf.log[rf.getTrimmedLogIndex(origIndex)].Command,
+				rf.Log(LogInfo, "Sending applyCh confirmation for commit of ", rf.log[rf.getTrimmedLogIndex(origIndex)], "at index", origIndex)
+				{
+					rf.applyCh <- ApplyMsg{
+						CommandValid: true,
+						CommandIndex: origIndex,
+						CommandTerm:  rf.currentTerm,
+						Command:      rf.log[rf.getTrimmedLogIndex(origIndex)].Command,
+					}
 				}
 			}
 		}
