@@ -1,17 +1,20 @@
 package kvraft
 
-import "../porcupine"
-import "../models"
-import "testing"
-import "strconv"
-import "time"
-import "math/rand"
-import "log"
-import "strings"
-import "sync"
-import "sync/atomic"
-import "fmt"
-import "io/ioutil"
+import (
+	"fmt"
+	"io/ioutil"
+	"log"
+	"math/rand"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"../models"
+	"../porcupine"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -684,7 +687,7 @@ func TestSnapshotSize3B(t *testing.T) {
 
 	cfg.begin("Test: snapshot size is reasonable (3B)")
 
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 50; i++ { // reduced this because it was taking so long...
 		Put(cfg, ck, "x", "0")
 		check(cfg, t, ck, "x", "0")
 		Put(cfg, ck, "x", "1")

@@ -119,7 +119,7 @@ func (kv *KVServer) WaitForAppliedOp(idx int, clientID string, clientSerial int,
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	kv.Log(LogInfo, "Received [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key)
+	kv.Log(LogDebug, "Received [ Client", args.ClientID, "] [ Request", args.ClientSerial, "] Get", args.Key)
 
 	// if resp is cached, serve it to avoid recommitting
 	kv.mu.Lock()
@@ -171,7 +171,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.Log(LogInfo, "Received [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value)
+	kv.Log(LogDebug, "Received [ Client", args.ClientID, "] [ Request", args.ClientSerial, "]", args.Op, args.Key, args.Value)
 
 	// if resp is cached, serve it to avoid recommitting
 	kv.mu.Lock()
@@ -414,6 +414,22 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// initialize maps
 	kv.latestResponse = make(map[string]KVAppliedOp)
 	kv.store = make(map[string]string)
+
+	// load snapshot if it exists
+	snapshotBytes := kv.persister.ReadSnapshot()
+	r := bytes.NewBuffer(snapshotBytes)
+	d := labgob.NewDecoder(r)
+	var s Snapshot
+	if e := d.Decode(&s); e != nil {
+		kv.Log(LogInfo, "Could not read a valid Snapshot on startup.\n - error", e)
+	} else {
+		kv.store = s.Store
+		kv.latestResponse = s.LatestResponse
+		stateBytes := kv.rf.TrimLog(s.LastIncludedIndex, s.LastIncludedTerm)
+		kv.persister.SaveStateAndSnapshot(stateBytes, snapshotBytes)
+		kv.lastIncludedIndex = s.LastIncludedIndex
+		kv.lastIndexApplied = kv.lastIncludedIndex
+	}
 
 	kv.Log(LogDebug, "Server started.")
 
